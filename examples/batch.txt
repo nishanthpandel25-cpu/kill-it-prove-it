@@ -1,0 +1,4 @@
+put name Nishanth
+put city Mangalore
+put project Kill-It-and-Prove-It
+del temporary_key
