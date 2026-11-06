@@ -22,10 +22,6 @@ from src.file_lock import FileLock
 # TEST-ONLY COMPACTION HOOK
 # --------------------------------------------------
 
-# Remains None during normal database operation.
-# Tests can assign a callback to pause compaction
-# at specific checkpoints.
-
 COMPACTION_TEST_HOOK = None
 
 
@@ -44,10 +40,21 @@ class Database:
     _locks_guard = threading.Lock()
     _path_locks = {}
 
-    def __init__(self, path="data/database.db"):
+    def __init__(self, path="data/database.db", max_size=None):
 
         self.path = os.path.abspath(path)
         self.closed = False
+
+        # None means unlimited database file size.
+        if max_size is not None:
+
+            if not isinstance(max_size, int) or isinstance(max_size, bool):
+                raise TypeError("max_size must be an integer or None")
+
+            if max_size < 0:
+                raise ValueError("max_size cannot be negative")
+
+        self.max_size = max_size
 
         directory = os.path.dirname(self.path)
         os.makedirs(directory, exist_ok=True)
@@ -68,7 +75,7 @@ class Database:
         with open(self.path, "ab"):
             pass
 
-        # Recover database when opening.
+        # Recover existing database.
         with self.lock, FileLock(self.path):
 
             self.data = recover_database(self.path)
@@ -80,9 +87,9 @@ class Database:
     # --------------------------------------------------
 
     @classmethod
-    def open(cls, path="data/database.db"):
+    def open(cls, path="data/database.db", max_size=None):
 
-        return cls(path)
+        return cls(path, max_size=max_size)
 
     # --------------------------------------------------
     # INTERNAL HELPERS
@@ -150,9 +157,15 @@ class Database:
 
             record = encode_record(PUT, key, value)
 
-            # Durably append before updating memory.
-            append_record(self.path, record)
+            # The storage layer checks the size limit
+            # before writing anything.
+            append_record(
+                self.path,
+                record,
+                max_size=self.max_size
+            )
 
+            # Update memory only after successful write.
             self.data[key] = value
 
             self._known_signature = self._get_file_signature()
@@ -191,7 +204,11 @@ class Database:
 
             record = encode_record(DELETE, key)
 
-            append_record(self.path, record)
+            append_record(
+                self.path,
+                record,
+                max_size=self.max_size
+            )
 
             self.data.pop(key, None)
 
@@ -226,7 +243,7 @@ class Database:
             records = []
             validated_operations = []
 
-            # Validate every operation before writing.
+            # Validate all operations before writing.
             for operation in operations:
 
                 if not isinstance(operation, (list, tuple)):
@@ -289,10 +306,16 @@ class Database:
                 count_bytes
             )
 
-            # Write and sync the complete transaction.
+            complete_transaction = (
+                [begin_record] + records + [commit_record]
+            )
+
+            # Check and append the entire transaction together.
+            # If it exceeds max_size, nothing is written.
             append_records(
                 self.path,
-                [begin_record] + records + [commit_record]
+                complete_transaction,
+                max_size=self.max_size
             )
 
             # Update memory only after successful append.
@@ -320,7 +343,6 @@ class Database:
 
             self._check_open()
 
-            # Refresh changes made by other processes.
             self._refresh_index_if_changed()
 
             old_size = os.path.getsize(self.path)
@@ -337,7 +359,7 @@ class Database:
 
             try:
 
-                # Keep only the latest live values.
+                # Encode only currently active records.
                 compacted_records = [
 
                     encode_record(PUT, key, value)
@@ -346,27 +368,23 @@ class Database:
 
                 ]
 
-                # Write and sync the temporary database.
+                # The completed compacted file must also
+                # respect the configured maximum size.
                 append_records(
                     temp_path,
-                    compacted_records
+                    compacted_records,
+                    max_size=self.max_size
                 )
 
-                # TEST CHECKPOINT 1:
-                # Temporary file has been fully written.
                 _compaction_checkpoint("temp_written")
 
                 new_size = os.path.getsize(temp_path)
 
-                # TEST CHECKPOINT 2:
-                # Pause immediately before replacement.
                 _compaction_checkpoint("before_replace")
 
-                # Atomically replace the original database.
+                # Replace original only after successful write.
                 os.replace(temp_path, self.path)
 
-                # TEST CHECKPOINT 3:
-                # Replacement has completed.
                 _compaction_checkpoint("after_replace")
 
                 # Sync directory entry on POSIX systems.
@@ -395,7 +413,6 @@ class Database:
 
             finally:
 
-                # Remove leftover temporary file if present.
                 if os.path.exists(temp_path):
 
                     os.remove(temp_path)
