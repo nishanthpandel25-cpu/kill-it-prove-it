@@ -88,9 +88,9 @@ def recover_database(path):
                 ">I", checksum_bytes
             )[0]
 
-            body = header_bytes + payload
-
-            calculated_checksum = zlib.crc32(body) & 0xFFFFFFFF
+            calculated_checksum = (
+                zlib.crc32(header_bytes + payload) & 0xFFFFFFFF
+            )
 
             if stored_checksum != calculated_checksum:
                 break
@@ -138,7 +138,8 @@ def recover_database(path):
 
                 committed_end = file.tell()
 
-                recovery_checkpoint("transaction_replayed")
+                if RECOVERY_TEST_HOOK is not None:
+                    recovery_checkpoint("transaction_replayed")
 
             else:
 
@@ -163,7 +164,8 @@ def recover_database(path):
 
                     committed_end = file.tell()
 
-                    recovery_checkpoint("record_replayed")
+                    if RECOVERY_TEST_HOOK is not None:
+                        recovery_checkpoint("record_replayed")
 
         # An unfinished transaction must be discarded completely.
         if pending_start is not None:
@@ -174,11 +176,13 @@ def recover_database(path):
 
             file.seek(committed_end)
 
-            recovery_checkpoint("before_truncate")
+            if RECOVERY_TEST_HOOK is not None:
+                recovery_checkpoint("before_truncate")
 
             file.truncate()
 
-            recovery_checkpoint("after_truncate")
+            if RECOVERY_TEST_HOOK is not None:
+                recovery_checkpoint("after_truncate")
 
             file.flush()
             os.fsync(file.fileno())

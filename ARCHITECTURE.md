@@ -37,8 +37,8 @@ The implementation uses Python standard-library modules and does not depend on a
               +----------+----------+
                          |
                          v
-                   FILE LOCKING
-                    file_lock.py
+                    FILE LOCKING
+                     file_lock.py
                          |
                          v
                     STORAGE LAYER
@@ -50,7 +50,7 @@ The implementation uses Python standard-library modules and does not depend on a
                          |
                          v
                    RECOVERY ENGINE
-                    recovery.py
+                     recovery.py
                          |
                          v
                    IN-MEMORY INDEX
@@ -283,28 +283,28 @@ The recovery engine reconstructs the database state by scanning the authoritativ
                     v
               Identify operation
                     |
-              +-----+-----+
-              |           |
-              v           v
-           PUT/DELETE  BEGIN/COMMIT
-              |           |
-              v           v
-         Apply valid  Buffer transaction
-         standalone        |
-         operation         v
-                      Validate COMMIT
+               +----+----+
+               |         |
+               v         v
+            PUT/DELETE  BEGIN/COMMIT
+               |         |
+               v         v
+          Apply valid  Buffer transaction
+          standalone        |
+          operation         v
+                       Validate COMMIT
                            |
-                      +----+----+
-                      |         |
-                      v         v
-                    Valid    Invalid/
-                    commit   incomplete
-                      |         |
-                      v         v
-                    Apply    Discard batch
-                    batch    from BEGIN
-                      |         |
-                      +----+----+
+                       +---+---+
+                       |       |
+                       v       v
+                     Valid   Invalid/
+                     commit  incomplete
+                       |       |
+                       v       v
+                     Apply   Discard batch
+                     batch   from BEGIN
+                       |       |
+                       +---+---+
                            |
                            v
                     Continue scanning
@@ -334,6 +334,8 @@ The recovery process checks:
 If the final record is incomplete or invalid, the file is truncated to the last valid committed position.
 
 Previously valid operations remain available.
+
+The recovery implementation also avoids unnecessary crash-test checkpoint calls when no test hook is configured. This reduces overhead during normal database recovery.
 
 ## 7. Durability, Atomicity and Recoverability
 
@@ -375,7 +377,7 @@ Compaction rewrites only the currently active key-value pairs.
           CURRENT DATABASE
                   |
                   v
-            Acquire locks
+             Acquire locks
                   |
                   v
          Remove stale temporary file
@@ -514,10 +516,56 @@ These tests simulate `OSError` with error number 28 after a partial physical wri
 
 | ID | Failure scenario | Expected recovery result | Verification status |
 |---|---|---|---|
-| F1 | 500 random kill/restart iterations | Acknowledged data remains intact | Passed: 500 crash iterations with independent oracle; kill points were after acknowledged writes |
-| F2 | Repeated kill/restart during recovery | Recovery remains idempotent | Partial: one controlled recovery-replay interruption passed; repeated interruption cycles were not established |
-| F3 | One million keys followed by restart | All acknowledged keys recovered within two seconds | Benchmark passed: 1,000,000 records recovered in 1.64 seconds; benchmark did not establish a killed-process test or compare every value |
-| F4 | Truncate final byte of database file | Recovery succeeds; incomplete final record discarded | Partial: torn-record and incomplete-tail recovery tests passed, but a dedicated final-byte truncation test was not established |
+| F1 | 500 random kill/restart iterations | Acknowledged data remains intact | Passed: 500 consecutive process terminations and restarts; 1,204 acknowledged operations; independent oracle verified after every restart |
+| F2 | Repeated kill/restart during recovery | Recovery remains idempotent | Passed: three consecutive recovery interruptions after replaying three records per attempt; final recovery verified all 100 acknowledged records |
+| F3 | One million keys followed by process termination and restart | All acknowledged keys recovered within two seconds | Passed: writer forcefully terminated after one million acknowledged PUTs; separate recovery process verified all one million keys and values in 1.7412 seconds |
+| F4 | Truncate final byte of database file | Recovery succeeds; incomplete final record discarded | Passed: exactly one byte removed from the end of an appended unacknowledged record; all three acknowledged records survived and the incomplete tail was removed |
+
+#### F1 — Detailed Evidence
+
+- Crash iterations: 500.
+- Random seed: 42.
+- Acknowledged operations: 1,204.
+- Final oracle records: 25.
+- Oracle comparison: passed after every restart.
+- Execution time: 57.61 seconds.
+
+The test randomizes termination between acknowledged database operations. It does not simulate termination at every possible physical instruction inside a record write. Separate torn-write tests cover incomplete physical writes.
+
+#### F2 — Detailed Evidence
+
+- Initial acknowledged records: 100.
+- Recovery interruptions: 3 consecutive child-process terminations.
+- Each interruption occurred after three standalone records were replayed.
+- Final normal recovery: successful.
+- All 100 records and their values: verified.
+
+#### F3 — Detailed Evidence
+
+| Measurement | Result |
+|---|---:|
+| Acknowledged keys written | 1,000,000 |
+| Batch size | 1,000 |
+| Process termination | Forced termination |
+| Recovery process | Separate process |
+| Recovered keys | 1,000,000 |
+| Verified key-value pairs | 1,000,000 |
+| Recovery time | 1.7412 seconds |
+| Required recovery time | Under 2.0000 seconds |
+
+The recovery checkpoint optimization avoids unnecessary test-hook calls when no recovery test hook is configured.
+
+The measured recovery time improved from 2.0436 seconds to 1.7412 seconds in the recorded runs.
+
+#### F4 — Detailed Evidence
+
+- Three acknowledged PUT records were created.
+- An additional unacknowledged record was appended.
+- Exactly one final byte was removed from the database file.
+- Database opening and recovery succeeded.
+- All three acknowledged records remained intact.
+- The incomplete unacknowledged record was discarded.
+- The database file returned to the acknowledged-data boundary.
 
 ### Group G — Explicit exclusions
 
@@ -531,19 +579,21 @@ The following are outside the stated project scope:
 
 ## 12. Performance and Test Evidence
 
-### 12.1 One-Million-Key Benchmark
+### 12.1 One-Million-Key Crash-Recovery Benchmark
 
-The following benchmark was previously run on the development environment:
+The following benchmark was executed on the development environment:
 
 | Metric | Result |
 |---|---:|
-| Records inserted | 1,000,000 |
-| Database size | Approximately 56.13 MB |
-| Insertion time | 7.16 seconds |
-| Recovery time | 1.64 seconds |
+| Records written | 1,000,000 |
+| Batch size | 1,000 |
+| Database size in earlier benchmark | Approximately 56.13 MB |
+| Earlier insertion time | 7.16 seconds |
+| Forced process termination | Yes |
+| Recovery process | Separate process |
 | Recovered records | 1,000,000 |
-
-The benchmark verified the recovered record count and selected values. It did not independently compare every value.
+| Verified values | All 1,000,000 |
+| Recovery time | 1.7412 seconds |
 
 Performance measurements are environment-dependent and should be repeated on the final demonstration machine.
 
@@ -555,18 +605,18 @@ Final full-suite command:
 python -m pytest -v
 ```
 
-Recorded result:
+Latest recorded result:
 
 | Metric | Result |
 |---|---:|
-| Tests collected | 57 |
-| Tests passed | 57 |
+| Tests collected | 61 |
+| Tests passed | 61 |
 | Tests failed | 0 |
-| Execution time | 31.98 seconds |
+| Execution time | 94.34 seconds |
 
-**Result: 57 passed in 31.98 seconds.**
+**Result: 61 passed in 94.34 seconds.**
 
-This is the recorded result from the development environment on Windows with Python 3.14.0 and pytest 9.2.0.
+This result was recorded on Windows with Python 3.14.0 and pytest 9.2.0.
 
 A passing automated test suite is evidence for the implemented test cases. It does not automatically establish that every possible crash timing or hardware failure has been covered.
 
@@ -577,11 +627,11 @@ The following areas require additional testing before claiming complete verifica
 1. Termination at every possible point inside the physical write loop.
 2. Power-loss behavior between complete record writes and durable synchronization.
 3. Termination inside the operating-system `os.replace()` call.
-4. Repeated interruption cycles during recovery.
-5. Forced termination at the exact size-limit rejection point.
-6. A dedicated final-byte truncation test.
-7. A one-million-key benchmark that also verifies every recovered value and includes forced process termination.
-8. Real physical disk-full behavior on the final demonstration environment.
+4. Forced termination at the exact size-limit rejection point.
+5. Real physical disk-full behavior on the final demonstration environment.
+6. Random corruption of arbitrary middle-of-file bytes.
+
+The following Group F scenarios have dedicated passing tests: F1, F2, F3 and F4.
 
 The implementation and the test evidence should be evaluated separately. No untested scenario should be presented as proven.
 
@@ -615,11 +665,15 @@ Kill-It-and-Prove-It/
 |   +-- test_get_during_batch.py
 |   +-- test_recovery_crash.py
 |   +-- test_recovery_truncation_crash.py
+|   +-- test_repeated_recovery_crash.py
 |   +-- test_close_crash.py
 |   +-- test_delete_crash.py
 |   +-- test_large_value_crash.py
 |   +-- test_10k_batch_crash.py
 |   +-- test_compaction_replace_race.py
+|   +-- test_f1_500_random_crash_restarts.py
+|   +-- test_f3_million_key_crash_recovery.py
+|   +-- test_final_byte_truncation.py
 |   +-- benchmark_database.py
 |
 +-- torture/
