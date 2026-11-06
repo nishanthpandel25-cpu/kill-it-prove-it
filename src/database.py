@@ -41,22 +41,31 @@ class Database:
 
             self.lock = Database._path_locks[normalized_path]
 
-        # Ensure the database file exists.
         with open(self.path, "ab"):
             pass
 
-        # Recover once when opening.
         with self.lock, FileLock(self.path):
             self.data = recover_database(self.path)
-            self._known_size = os.path.getsize(self.path)
+            self._known_signature = self._get_file_signature()
 
     @classmethod
     def open(cls, path="data/database.db"):
         return cls(path)
 
     def _check_open(self):
+
         if self.closed:
             raise RuntimeError("Database is closed")
+
+    def _get_file_signature(self):
+
+        stat = os.stat(self.path)
+
+        return (
+            stat.st_size,
+            stat.st_mtime_ns,
+            stat.st_ctime_ns
+        )
 
     def _validate_key(self, key):
 
@@ -77,22 +86,14 @@ class Database:
             raise ValueError("Value cannot exceed 1 MB")
 
     def _refresh_index_if_changed(self):
-        """
-        Refresh only when another process has changed
-        the database file.
 
-        The database is append-only, so normal writes
-        increase the file size.
-        """
+        current_signature = self._get_file_signature()
 
-        current_size = os.path.getsize(self.path)
-
-        if current_size != self._known_size:
+        if current_signature != self._known_signature:
 
             self.data = recover_database(self.path)
 
-            # Recovery can truncate an incomplete tail.
-            self._known_size = os.path.getsize(self.path)
+            self._known_signature = self._get_file_signature()
 
     # --------------------------------------------------
     # PUT
@@ -103,7 +104,6 @@ class Database:
         with self.lock, FileLock(self.path):
 
             self._check_open()
-
             self._validate_key(key)
             self._validate_value(value)
 
@@ -111,12 +111,11 @@ class Database:
 
             record = encode_record(PUT, key, value)
 
-            # Durably append before updating the index.
             append_record(self.path, record)
 
             self.data[key] = value
 
-            self._known_size = os.path.getsize(self.path)
+            self._known_signature = self._get_file_signature()
 
             return True
 
@@ -129,7 +128,6 @@ class Database:
         with self.lock, FileLock(self.path):
 
             self._check_open()
-
             self._validate_key(key)
 
             self._refresh_index_if_changed()
@@ -145,7 +143,6 @@ class Database:
         with self.lock, FileLock(self.path):
 
             self._check_open()
-
             self._validate_key(key)
 
             self._refresh_index_if_changed()
@@ -156,7 +153,7 @@ class Database:
 
             self.data.pop(key, None)
 
-            self._known_size = os.path.getsize(self.path)
+            self._known_signature = self._get_file_signature()
 
             return True
 
@@ -185,7 +182,6 @@ class Database:
             records = []
             validated_operations = []
 
-            # Validate everything before writing.
             for operation in operations:
 
                 if not isinstance(operation, (list, tuple)):
@@ -226,7 +222,6 @@ class Database:
                     raise ValueError("Invalid batch operation")
 
             transaction_id = uuid.uuid4().bytes
-
             operation_count = len(validated_operations)
 
             count_bytes = struct.pack(
@@ -246,13 +241,11 @@ class Database:
                 count_bytes
             )
 
-            # Write and fsync the complete transaction.
             append_records(
                 self.path,
                 [begin_record] + records + [commit_record]
             )
 
-            # Update index only after successful append.
             for operation, key, value in validated_operations:
 
                 if operation == PUT:
@@ -261,9 +254,81 @@ class Database:
                 elif operation == DELETE:
                     self.data.pop(key, None)
 
-            self._known_size = os.path.getsize(self.path)
+            self._known_signature = self._get_file_signature()
 
             return True
+
+    # --------------------------------------------------
+    # COMPACTION
+    # --------------------------------------------------
+
+    def compact(self):
+
+        with self.lock, FileLock(self.path):
+
+            self._check_open()
+
+            # Include any changes made by other processes.
+            self._refresh_index_if_changed()
+
+            old_size = os.path.getsize(self.path)
+
+            directory = os.path.dirname(self.path)
+
+            temp_path = os.path.join(
+                directory,
+                os.path.basename(self.path)
+                + "."
+                + uuid.uuid4().hex
+                + ".compact.tmp"
+            )
+
+            try:
+
+                # Write only the latest live values.
+                compacted_records = [
+                    encode_record(PUT, key, value)
+                    for key, value in self.data.items()
+                ]
+
+                # This also creates and syncs an empty file
+                # when the database contains no live keys.
+                append_records(temp_path, compacted_records)
+
+                # Confirm the temporary file is complete.
+                new_size = os.path.getsize(temp_path)
+
+                # Atomically replace the original file.
+                # Both files are in the same directory.
+                os.replace(temp_path, self.path)
+
+                # On POSIX, sync the directory entry so the
+                # replacement is made durable where supported.
+                if os.name != "nt":
+
+                    directory_fd = os.open(directory, os.O_RDONLY)
+
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+
+                self._known_signature = self._get_file_signature()
+
+                return {
+                    "old_size": old_size,
+                    "new_size": new_size,
+                    "bytes_saved": old_size - new_size
+                }
+
+            finally:
+
+                # If writing or replacement failed, remove
+                # the unused temporary file. The original
+                # database remains authoritative unless
+                # os.replace has already succeeded.
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
 
     # --------------------------------------------------
     # CLOSE
