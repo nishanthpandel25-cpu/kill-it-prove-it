@@ -25,36 +25,36 @@ The implementation uses Python standard-library modules and does not depend on a
                  APPLICATION / CLI
                          |
                          v
-                  DATABASE ENGINE
-                    database.py
+                   DATABASE ENGINE
+                     database.py
                          |
-             +-----------+-----------+
-             |           |           |
-             v           v           v
-          PUT/GET     BATCH       COMPACTION
-          DELETE      HANDLER       HANDLER
-             |           |           |
-             +-----------+-----------+
-                         |
-                         v
-                  FILE LOCKING
-                   file_lock.py
+              +----------+----------+
+              |          |          |
+              v          v          v
+           PUT/GET     BATCH    COMPACTION
+           DELETE     HANDLER     HANDLER
+              |          |          |
+              +----------+----------+
                          |
                          v
-                   STORAGE LAYER
-                    storage.py
+                   FILE LOCKING
+                    file_lock.py
                          |
                          v
-                 AUTHORITATIVE FILE
-                   database.db
+                    STORAGE LAYER
+                     storage.py
                          |
                          v
-                  RECOVERY ENGINE
-                   recovery.py
+                  AUTHORITATIVE FILE
+                    database.db
                          |
                          v
-                  IN-MEMORY INDEX
-                    Python dict
+                   RECOVERY ENGINE
+                    recovery.py
+                         |
+                         v
+                   IN-MEMORY INDEX
+                     Python dict
 ```
 
 ### Main Components
@@ -134,7 +134,7 @@ The checksum is calculated using CRC32 to detect corrupted or incomplete records
 Total record size:
 
 ```text
-13 + key_length + value_length + 4 bytes
+17 + key_length + value_length bytes
 ```
 
 The key and value are stored as byte strings.
@@ -263,60 +263,60 @@ The recovery engine reconstructs the database state by scanning the authoritativ
               DATABASE OPEN
                     |
                     v
-             Acquire file lock
+              Acquire file lock
                     |
                     v
-             Open database file
+              Open database file
                     |
                     v
-             Read record header
+              Read record header
                     |
                     v
-          Validate magic and lengths
+           Validate magic and lengths
                     |
                     v
-             Read key and value
+              Read key and value
                     |
                     v
-             Validate CRC32
+              Validate CRC32
                     |
                     v
-             Identify operation
+              Identify operation
                     |
-             +------+------+
-             |             |
-             v             v
-          PUT/DELETE    BEGIN/COMMIT
-             |             |
-             v             v
-        Apply valid     Buffer transaction
-        standalone          |
-        operation           v
-             |         Validate COMMIT
-             |             |
-             |        +----+----+
-             |        |         |
-             |        v         v
-             |     Valid     Invalid/
-             |     commit    incomplete
-             |        |         |
-             |        v         v
-             |     Apply     Discard batch
-             |     batch     from BEGIN
-             |        |         |
-             +--------+---------+
-                      |
-                      v
-              Continue scanning
-                      |
-                      v
-              Truncate invalid tail
-                      |
-                      v
-              Rebuild in-memory index
-                      |
-                      v
-                OPEN COMPLETE
+              +-----+-----+
+              |           |
+              v           v
+           PUT/DELETE  BEGIN/COMMIT
+              |           |
+              v           v
+         Apply valid  Buffer transaction
+         standalone        |
+         operation         v
+                      Validate COMMIT
+                           |
+                      +----+----+
+                      |         |
+                      v         v
+                    Valid    Invalid/
+                    commit   incomplete
+                      |         |
+                      v         v
+                    Apply    Discard batch
+                    batch    from BEGIN
+                      |         |
+                      +----+----+
+                           |
+                           v
+                    Continue scanning
+                           |
+                           v
+                    Truncate invalid tail
+                           |
+                           v
+                    Rebuild in-memory index
+                           |
+                           v
+                      OPEN COMPLETE
 ```
 
 ### Recovery Guarantees
@@ -344,6 +344,8 @@ PUT and DELETE operations append their records and call `fsync()` before updatin
 Batch operations append their transaction records and commit marker, synchronize the file and then update the in-memory index.
 
 This provides the intended durability boundary: successful operations are synchronized before success is returned.
+
+Process-termination tests provide evidence for the tested crash points. They do not constitute a complete power-loss or hardware-failure guarantee.
 
 ### 7.2 Atomicity
 
@@ -373,31 +375,31 @@ Compaction rewrites only the currently active key-value pairs.
           CURRENT DATABASE
                   |
                   v
-           Acquire locks
+            Acquire locks
                   |
                   v
-        Remove stale temporary file
+         Remove stale temporary file
                   |
                   v
-       Collect active key-value pairs
+        Collect active key-value pairs
                   |
                   v
-       Write new temporary database
+        Write new temporary database
                   |
                   v
-         Complete temporary file
+          Complete temporary file
                   |
                   v
-        Atomically replace database
+         Atomically replace database
                   |
                   v
-         Synchronize directory
+          Synchronize directory
                   |
                   v
-          Update file signature
+           Update file signature
                   |
                   v
-           COMPACTION COMPLETE
+            COMPACTION COMPLETE
 ```
 
 The original database remains authoritative until the temporary database is complete and the replacement operation occurs.
@@ -405,6 +407,8 @@ The original database remains authoritative until the temporary database is comp
 The temporary file is cleaned up after normal completion or an exception.
 
 A stale temporary file from a previous interrupted compaction is removed before a new compaction begins.
+
+Testing covers checkpoints before and after replacement. It does not prove termination at every possible instruction inside the operating-system replacement call.
 
 ## 9. Database Size Management
 
@@ -421,6 +425,8 @@ The storage layer:
 Batch operations are checked as a complete append sequence before writing.
 
 Compaction also applies the configured size limit to its temporary database file.
+
+DELETE records consume log space. Space is made reusable by compaction, not immediately by deletion.
 
 ## 10. Implementation Constraints
 
@@ -441,44 +447,91 @@ Compaction also applies the configured size limit to its temporary database file
 
 ## 11. Scenario Verification Matrix
 
-**Verification status:** The matrix below distinguishes implemented mechanisms from test evidence. A mechanism being implemented does not automatically mean that every exact crash point has been tested.
+**Verification status:** The matrix distinguishes implemented mechanisms from test evidence. A mechanism being implemented does not automatically mean that every exact crash point has been tested.
 
-| ID | Failure scenario | Expected recovery result | Mechanism | Verification status |
-|---|---|---|---|---|
-| A1 | Kill before PUT bytes are written | Old value or absent key | Append-only write | Not individually verified |
-| A2 | Kill during a partial PUT write | Old value or absent key; no corrupted value | CRC32 and tail truncation | Not individually verified |
-| A3 | Kill after complete record write but before fsync | Old or new value | Record recovery | Not individually verified |
-| A4 | Kill after fsync but before acknowledgement | New value present | `fsync()` before success | Not individually verified |
-| A5 | Kill after successful PUT | New value present | Durable append | Covered by durability testing; exact checkpoint not established |
-| A6 | Kill during DELETE | Old value or absent key | Append-only DELETE record | Not individually verified |
-| A7 | Kill during 1 MB PUT | Old or new value; no partial value | CRC32 and recovery | Not individually verified |
-| B1 | Kill after some batch operations are written | Entire batch discarded | BEGIN boundary | Not individually verified |
-| B2 | Kill after all operations but before COMMIT | Entire batch discarded | COMMIT validation | Not individually verified |
-| B3 | Kill after COMMIT write but before fsync | Entire batch or no batch | Transaction recovery | Not individually verified |
-| B4 | Kill after successful batch acknowledgement | Entire batch present | Append and fsync before acknowledgement | Covered by batch durability tests; exact checkpoint not established |
-| B5 | PUT and DELETE same key in one batch | Operations applied in order | Sequential batch application | Not individually verified |
-| B6 | Kill halfway through a 10,000-operation batch | Entire batch discarded | Transaction boundaries | Not individually verified |
-| C1 | Kill during recovery replay | Next recovery reconstructs valid state | Log replay | Not individually verified |
-| C2 | Kill during torn-tail truncation | Next recovery succeeds | Tail validation and truncation | Not individually verified |
-| C3 | Kill before compaction replacement | Original database remains authoritative | Temporary file | Verified at compaction checkpoints |
-| C4 | Kill during replacement | Old or new complete database | `os.replace()` | Verified immediately before and after replacement; not during the OS call |
-| C5 | Kill after replacement before temporary cleanup | Data remains intact; stale temporary file handled | Replacement and cleanup | Replacement checkpoint tested; stale-file recovery tested separately |
-| C6 | Kill during close | Database remains recoverable | Persistent log | Not individually verified |
-| D1 | Concurrent writers on different keys | Acknowledged operations remain present | Process locking | Concurrent writer testing completed |
-| D2 | Concurrent writers on same key | One complete value wins | Process locking | Not individually verified |
-| D3 | Long batch and single PUT operations concurrently | Batch all-or-nothing; acknowledged PUTs present | Shared locks | Not individually verified |
-| D4 | GET during batch | Before or after batch state only | Shared locks | Not individually verified |
-| E1 | PUT exceeds configured size limit | Error; existing data intact | Size check | Disk-full and size-limit tests completed; exact scenario not separately established |
-| E2 | Batch exceeds configured size limit | Error; no batch operations visible | Pre-append size check | Disk-full and batch tests completed; exact scenario not separately established |
-| E3 | Kill after size-limit rejection | Previous acknowledged data remains | Append rollback and recovery | Not individually verified |
-| E4 | Size limit reached during compaction | Original database remains intact if compaction fails before replacement | Temporary-file compaction | Not individually verified |
-| E5 | Delete records and compact | Storage space becomes reusable | Compaction | Verified by compaction tests |
-| F1 | 500 random kill/restart iterations | Acknowledged data remains intact | Recovery and oracle | Random crash runner completed; its kill points were after acknowledged writes |
-| F2 | Repeated kill/restart during recovery | Recovery remains idempotent | Recovery replay | Not individually verified |
-| F3 | One million keys followed by restart | All acknowledged keys recovered within 2 seconds | Log replay and in-memory index | Million-key benchmark completed; measured recovery was 1.64 seconds |
-| F4 | Truncate final byte of database file | Recovery succeeds; incomplete final record discarded | CRC32 and tail truncation | Not individually verified |
+### Group A — Individual writes and durability
 
-## 12. Performance Evidence
+| ID | Failure scenario | Expected recovery result | Verification status |
+|---|---|---|---|
+| A1 | Kill before PUT bytes are written | Old value or absent key | Passed: controlled termination before first physical write |
+| A2 | Kill during a partial PUT write | Old value or absent key; no corrupted value | Passed: torn-record recovery test |
+| A3 | Kill after complete record write but before fsync | Old or new value may be recovered | Passed: complete record was recovered in the tested process-termination case; not a power-loss test |
+| A4 | Kill after fsync but before acknowledgement | New value present | Passed: forced termination after fsync and before return |
+| A5 | Kill after successful PUT | New value present | Passed: 100 acknowledged writes survived forced termination |
+| A6 | Kill during DELETE | Old value remains if DELETE is incomplete | Passed: partial DELETE recovery test |
+| A7 | Kill during 1 MB PUT | Old or new value; no partial value | Passed: interrupted large-value write recovery test |
+
+### Group B — Atomic batch operations
+
+| ID | Failure scenario | Expected recovery result | Verification status |
+|---|---|---|---|
+| B1 | Kill after some batch operations are written | Entire batch discarded | Passed: termination after three of ten operations |
+| B2 | Kill after all operations but before COMMIT | Entire batch discarded | Passed |
+| B3 | Kill after COMMIT write but before fsync | Entire batch or no batch may be recovered | Passed: complete batch recovered in the tested process-termination case; not a power-loss test |
+| B4 | Kill after successful batch synchronization but before acknowledgement | Entire batch present | Passed: after-sync checkpoint test |
+| B5 | PUT and DELETE same key in one batch | Operations applied in order | Passed |
+| B6 | Kill halfway through a 10,000-operation batch | Entire batch discarded | Passed: partial batch termination; recovery measured below two seconds |
+
+### Group C — Recovery and compaction
+
+| ID | Failure scenario | Expected recovery result | Verification status |
+|---|---|---|---|
+| C1 | Kill during recovery replay | Next recovery reconstructs valid state | Passed: controlled termination during replay |
+| C2 | Kill during torn-tail truncation | Next recovery succeeds | Passed: termination after truncation and before flush/fsync |
+| C3 | Kill before compaction replacement | Original database remains authoritative | Passed: temporary-file and pre-replacement checkpoints |
+| C4 | Kill during replacement | Old or new complete database | Partial: 20 termination attempts around the replacement boundary passed; termination inside the OS call was not demonstrated |
+| C5 | Kill after replacement before temporary cleanup | Data remains intact; stale temporary file handled | Passed: post-replacement checkpoint and stale temporary-file regression test |
+| C6 | Kill during close | Database remains recoverable | Passed: controlled termination during close |
+
+### Group D — Concurrent operations
+
+| ID | Failure scenario | Expected recovery result | Verification status |
+|---|---|---|---|
+| D1 | Concurrent writers on different keys with random termination | Acknowledged operations remain present | Passed: two workers, 30 acknowledged writes, oracle verification; termination was coordinated rather than guaranteed during simultaneous physical writes |
+| D2 | Concurrent writers on the same key | One complete value wins | Passed: two processes performed 200 PUTs; final value was one complete submitted value |
+| D3 | Long batch and single PUT operations concurrently | Batch all-or-nothing; acknowledged PUTs present | Passed: partial batch write was interrupted, batch discarded and 30 individual writes recovered; interruption occurred after five bytes of the first batch record |
+| D4 | GET during batch | Before or after batch state only | Passed: reader waited for batch lock and observed the complete after-state; no partial batch visibility |
+
+### Group E — Size limits and disk-full handling
+
+| ID | Failure scenario | Expected recovery result | Verification status |
+|---|---|---|---|
+| E1 | PUT exceeds configured size limit | Error; existing data intact | Passed: configured size-limit test |
+| E2 | Batch exceeds configured size limit | Error; no batch operations visible | Passed: configured size-limit test |
+| E3 | Kill after size-limit rejection | Previous acknowledged data remains | Partial: restart after failed write was tested; forced termination at the exact rejection point was not tested |
+| E4 | Size limit prevents compaction | Original database remains intact | Passed: failed compaction preserves original database |
+| E5 | Delete records and compact | Storage space becomes reusable | Passed: delete, compaction, new write and restart test |
+
+Additional disk-full evidence:
+
+- Partial PUT failure rollback passed.
+- Partial batch failure rollback passed.
+- Recovery after simulated disk-full failure passed.
+
+These tests simulate `OSError` with error number 28 after a partial physical write. They do not simulate a real disk becoming physically full.
+
+### Group F — Torture testing and recovery performance
+
+| ID | Failure scenario | Expected recovery result | Verification status |
+|---|---|---|---|
+| F1 | 500 random kill/restart iterations | Acknowledged data remains intact | Passed: 500 crash iterations with independent oracle; kill points were after acknowledged writes |
+| F2 | Repeated kill/restart during recovery | Recovery remains idempotent | Partial: one controlled recovery-replay interruption passed; repeated interruption cycles were not established |
+| F3 | One million keys followed by restart | All acknowledged keys recovered within two seconds | Benchmark passed: 1,000,000 records recovered in 1.64 seconds; benchmark did not establish a killed-process test or compare every value |
+| F4 | Truncate final byte of database file | Recovery succeeds; incomplete final record discarded | Partial: torn-record and incomplete-tail recovery tests passed, but a dedicated final-byte truncation test was not established |
+
+### Group G — Explicit exclusions
+
+The following are outside the stated project scope:
+
+- Random bit rot in the middle of the database file.
+- Network access and distributed operation.
+- Sharding or multiple authoritative database files.
+- Multi-batch transactions and isolation levels.
+- Recovery performance guarantees beyond the specified two-second target.
+
+## 12. Performance and Test Evidence
+
+### 12.1 One-Million-Key Benchmark
 
 The following benchmark was previously run on the development environment:
 
@@ -494,19 +547,41 @@ The benchmark verified the recovered record count and selected values. It did no
 
 Performance measurements are environment-dependent and should be repeated on the final demonstration machine.
 
+### 12.2 Complete Automated Test Suite
+
+Final full-suite command:
+
+```powershell
+python -m pytest -v
+```
+
+Recorded result:
+
+| Metric | Result |
+|---|---:|
+| Tests collected | 57 |
+| Tests passed | 57 |
+| Tests failed | 0 |
+| Execution time | 31.98 seconds |
+
+**Result: 57 passed in 31.98 seconds.**
+
+This is the recorded result from the development environment on Windows with Python 3.14.0 and pytest 9.2.0.
+
+A passing automated test suite is evidence for the implemented test cases. It does not automatically establish that every possible crash timing or hardware failure has been covered.
+
 ## 13. Known Limitations and Further Verification
 
 The following areas require additional testing before claiming complete verification:
 
-1. Exact process termination during the physical write loop.
-2. Exact process termination between COMMIT write and fsync.
-3. Concurrent operations on the same key.
-4. Concurrent GET during an active batch.
-5. Process termination during recovery truncation.
-6. Process termination during the operating-system replacement call.
-7. Recovery idempotency across repeated interruptions.
-8. Disk-full failures during physical writes and compaction.
-9. Exact one-million-key recovery performance on the final demonstration machine.
+1. Termination at every possible point inside the physical write loop.
+2. Power-loss behavior between complete record writes and durable synchronization.
+3. Termination inside the operating-system `os.replace()` call.
+4. Repeated interruption cycles during recovery.
+5. Forced termination at the exact size-limit rejection point.
+6. A dedicated final-byte truncation test.
+7. A one-million-key benchmark that also verifies every recovered value and includes forced process termination.
+8. Real physical disk-full behavior on the final demonstration environment.
 
 The implementation and the test evidence should be evaluated separately. No untested scenario should be presented as proven.
 
@@ -534,6 +609,17 @@ Kill-It-and-Prove-It/
 |   +-- test_size_limits.py
 |   +-- test_disk_full.py
 |   +-- test_large_batch_crash.py
+|   +-- test_d1_concurrent_crash.py
+|   +-- test_same_key_concurrency.py
+|   +-- test_batch_writer_crash.py
+|   +-- test_get_during_batch.py
+|   +-- test_recovery_crash.py
+|   +-- test_recovery_truncation_crash.py
+|   +-- test_close_crash.py
+|   +-- test_delete_crash.py
+|   +-- test_large_value_crash.py
+|   +-- test_10k_batch_crash.py
+|   +-- test_compaction_replace_race.py
 |   +-- benchmark_database.py
 |
 +-- torture/

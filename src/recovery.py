@@ -1,3 +1,4 @@
+
 import os
 import struct
 import zlib
@@ -13,6 +14,15 @@ from src.storage import (
 
 MAX_KEY_SIZE = 1024
 MAX_VALUE_SIZE = 1024 * 1024
+
+# Used only by controlled crash tests.
+RECOVERY_TEST_HOOK = None
+
+
+def recovery_checkpoint(stage):
+    """Execute a checkpoint when a crash test hook is configured."""
+    if RECOVERY_TEST_HOOK is not None:
+        RECOVERY_TEST_HOOK(stage)
 
 
 def recover_database(path):
@@ -89,6 +99,7 @@ def recover_database(path):
             value = payload[key_len:]
 
             if operation == BEGIN:
+
                 if pending_start is not None:
                     break
 
@@ -98,6 +109,7 @@ def recover_database(path):
                 pending_operations = []
 
             elif operation == COMMIT:
+
                 if pending_start is None:
                     break
 
@@ -113,6 +125,7 @@ def recover_database(path):
                     break
 
                 for op, op_key, op_value in pending_operations:
+
                     if op == PUT:
                         data[op_key] = op_value
                     else:
@@ -125,18 +138,24 @@ def recover_database(path):
 
                 committed_end = file.tell()
 
+                recovery_checkpoint("transaction_replayed")
+
             else:
+
                 if operation == PUT:
                     current_operation = (PUT, key, value)
                 else:
                     current_operation = (DELETE, key, b"")
 
                 if pending_start is not None:
+
                     pending_operations.append(current_operation)
 
                     if len(pending_operations) > pending_count:
                         break
+
                 else:
+
                     if operation == PUT:
                         data[key] = value
                     else:
@@ -144,13 +163,23 @@ def recover_database(path):
 
                     committed_end = file.tell()
 
-        # If a batch is unfinished, remove it entirely.
+                    recovery_checkpoint("record_replayed")
+
+        # An unfinished transaction must be discarded completely.
         if pending_start is not None:
             committed_end = pending_start
 
+        # Remove incomplete or invalid trailing bytes.
         if os.path.getsize(path) != committed_end:
+
             file.seek(committed_end)
+
+            recovery_checkpoint("before_truncate")
+
             file.truncate()
+
+            recovery_checkpoint("after_truncate")
+
             file.flush()
             os.fsync(file.fileno())
 

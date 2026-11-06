@@ -1,322 +1,278 @@
-# BREAKING.md — Failure Testing and Recovery Evidence
+# Failure Testing and Verification Report
 
 ## 1. Purpose
 
-This document records the failure-testing strategy, observed results and known limitations of the Kill It and Prove It database engine.
+This document records the failure-testing strategy, observed results, verified behavior, and known limitations of the embedded key-value database.
 
-The objective is to verify that the database maintains data integrity and recovers correctly after unexpected process termination, incomplete transactions, concurrent access and storage failures.
+The objective is to verify that the database maintains data integrity and recovers correctly after unexpected process termination, incomplete transactions, concurrent access, and storage failures.
 
-Only completed tests and observed results are marked as verified.
+Only completed tests and observed results are marked as verified. Implemented mechanisms and experimentally verified behavior are documented separately.
 
-## 2. Testing Environment
+## 2. Test Environment
 
-| Component | Environment |
+| Component | Details |
 |---|---|
-| Operating system | Windows |
-| Runtime | Python 3.14.0 |
-| Test framework | pytest 9.2.0 |
-| Project language | Python |
-| Database architecture | Append-only key-value database |
-| Storage format | Custom binary record format |
-| Version control | Git |
+| Operating System | Windows |
+| Python Version | Python 3.14.0 |
+| Test Framework | pytest 9.2.0 |
+| Database Type | Embedded append-only key-value database |
+| Storage Format | Binary records with CRC32 checksums |
+| Concurrency | Multiple processes and threads |
+| Recovery | Log replay and incomplete-tail truncation |
 
-## 3. Automated Test Suite
+## 3. Overall Test Results
 
-Command:
+The complete automated test suite was executed successfully.
 
-```powershell
-py -m pytest -q
-```
-
-Latest recorded result:
+**Latest full test execution:**
 
 ```text
-36 passed in 10.97s
+python -m pytest -q
+
+57 passed in 29.44s
 ```
 
-All 36 tests passed after the stale compaction temporary-file fix.
+No test failures were reported.
 
-The test suite covers:
+## 4. Group A — Individual Write Crash Testing
 
-- Basic PUT, GET and DELETE operations.
-- Atomic batch operations.
-- Crash recovery.
-- Concurrent access.
-- Thread synchronization.
-- Process synchronization.
-- Database durability.
-- Compaction.
-- Compaction crash recovery.
-- Database size limits.
-- Disk-full handling.
-- Large values and large batches.
+The following scenarios were tested:
 
-## 4. Random Crash and Restart Testing
+| ID | Scenario | Observed Result |
+|---|---|---|
+| A1 | Process killed before the first physical PUT write | Previous database state preserved |
+| A2 | Process killed during a partial record write | Incomplete record discarded during recovery |
+| A3 | Complete record written before fsync | Complete record was recovered in the observed test; this does not establish durability before fsync |
+| A4 | Process killed after fsync but before acknowledgement | Record recovered successfully |
+| A5 | Process killed after successful PUT acknowledgement | Acknowledged records survived |
+| A6 | Process killed during DELETE record write | Previous value remained available |
+| A7 | Process killed during a 1 MB PUT | Partial value discarded; previous valid data preserved |
 
-The random crash runner performs repeated database process termination and restart experiments.
+**Result:** All seven controlled individual-write scenarios were tested successfully.
 
-Recorded configuration:
+## 5. Group B — Atomic Batch Crash Testing
 
-| Parameter | Value |
-|---|---:|
-| Iterations | 500 |
-| Random seed | 42 |
-| PUT operations per iteration | 10 |
-| Total acknowledged writes | 2,729 |
-| Recovered acknowledged writes | 2,729 |
+Batch operations use BEGIN and COMMIT records. Recovery applies a batch only when a valid COMMIT record is present.
 
-### Observed Result
+| ID | Scenario | Observed Result |
+|---|---|---|
+| B1 | Kill after 3 of 10 batch operations were written | Entire incomplete batch discarded |
+| B2 | Kill after all operations but before COMMIT | Entire batch discarded |
+| B3 | Kill after COMMIT bytes were written but before fsync | All batch operations recovered in the observed test |
+| B4 | Kill after successful batch fsync but before return | Entire batch recovered |
+| B5 | PUT X followed by DELETE X in one batch | X remained absent after recovery |
+| B6 | Kill halfway through a 10,000-operation batch | Incomplete batch discarded; previous records preserved |
+
+### B6 Recovery Measurement
+
+The 10,000-operation batch crash test completed with:
+
+- Existing records preserved: 100
+- Recovery time: approximately 0.0253 seconds
+- Incomplete batch operations: discarded
+
+**Result:** All six controlled batch scenarios passed.
+
+Note: B3 demonstrates the observed process-kill behavior before fsync. It does not prove what would happen under every possible power-loss or storage-device failure.
+
+## 6. Group C — Recovery and Compaction Crash Testing
+
+| ID | Scenario | Observed Result |
+|---|---|---|
+| C1 | Kill during recovery replay | Database recovered successfully on the next open |
+| C2 | Kill after truncating an incomplete tail | Database recovered successfully on the next open |
+| C3 | Kill during compaction before replacement | Original database remained recoverable |
+| C4 | Kill around the compaction replacement boundary | Repeated pre-replacement termination tests passed; termination inside the OS rename operation was not directly tested |
+| C5 | Kill after replacement before temporary-file cleanup | Database remained recoverable |
+| C6 | Kill during close | Database reopened with its records intact |
+
+### Compaction Stress Test
+
+The compaction replacement-boundary test was repeated 20 times. Each iteration terminated the child process before replacement and verified that the database could be reopened.
+
+**Result:** C1, C2, C3, C5, and C6 passed their controlled tests. C4 received partial verification; termination inside the operating-system replacement operation was not directly established.
+
+## 7. Group D — Concurrent Writer Testing
+
+| ID | Scenario | Observed Result |
+|---|---|---|
+| D1 | Two concurrent writers with forced process termination | Acknowledged writes recovered and oracle verification passed |
+| D2 | Two writers updating the same key | Final value was one complete value from the competing writers |
+| D3 | Long batch and individual PUT operations with batch termination | Incomplete batch discarded; individual writer completed its operations |
+| D4 | GET while a batch was executing | Reader observed the completed batch state, not a partial batch |
+
+### Additional Concurrent Writer Test
+
+A separate multi-process test used four processes, each performing 125 operations.
+
+- Total operations: 500
+- PUT operations: 400
+- DELETE operations: 100
+- Expected remaining records: 300
+- Independent oracle verification: passed
+
+**Result:** All four concurrent-access scenarios passed with the qualifications described above.
+
+## 8. Group E — Database Size Limit and Disk-Full Testing
+
+The database supports a configurable maximum storage-file size.
+
+| ID | Scenario | Observed Result |
+|---|---|---|
+| E1 | Single PUT reaches the configured size limit | Write rejected cleanly |
+| E2 | Batch exceeds the configured size limit | Batch rejected without partial logical application |
+| E3 | Size limit reached, followed by process restart | Existing database data remained recoverable |
+| E4 | Size limit reached during compaction | Original database remained intact |
+| E5 | Delete records, compact, and write again | New writes succeeded after compaction |
+
+### Disk-Full Simulation
+
+The disk-full tests simulated an `OSError` with error code 28 after a partial physical write.
+
+The tests verified:
+
+- Partial PUT rollback.
+- Partial batch rollback.
+- Recovery after a failed write.
+
+Test output:
 
 ```text
-500 crash/restart iterations completed.
-Acknowledged writes: 2729
-Recovered writes: 2729
-Oracle verification: PASSED
+9 passed in 0.18s
 ```
 
-The independent oracle confirmed that all acknowledged writes were recovered.
+**Result:** The size-limit and simulated disk-full tests passed. E3 verifies restart after a failed write, rather than a forced kill at the exact moment the limit is reached.
 
-**Limitation:** These kill points occurred after acknowledged writes. This experiment does not prove that the process was terminated at every possible point inside the physical file-write operation.
+## 9. Group F — Long-Running and Large-Scale Testing
 
-## 5. Concurrent Writer Testing
+### F1 — 500 Iterations of Random Crash Testing
 
-The concurrent writer runner tested multiple independent processes accessing the same database.
+The random crash torture test ran 500 iterations using seed 42.
 
-Configuration:
+Observed results:
 
-| Parameter | Value |
-|---|---:|
-| Concurrent processes | 4 |
-| Operations per process | 125 |
-| Total operations | 500 |
-| PUT operations per process | 100 |
-| DELETE operations per process | 25 |
+- Crash iterations: 500
+- Acknowledged writes recovered: 2,729
+- Independent oracle verification: passed
 
-The independent oracle verified the resulting database state.
+The termination points were selected around acknowledged operations. This does not represent random termination at every possible physical write instruction.
 
-### Observed Result
+### F2 — Repeated Recovery Interruption
 
-```text
-Concurrent writer test completed.
-Total operations: 500
-Expected records: 300
-Oracle verification: PASSED
-```
+A controlled recovery interruption was tested by terminating recovery during record replay and reopening the database.
 
-This confirms that the tested concurrent writer workload produced the expected final state.
+The database successfully recovered on the next open.
 
-## 6. Large Value and Batch Testing
+Repeated kill/restart/kill cycles during recovery have not yet been fully established.
 
-The large-data runner tested the following value sizes:
+### F3 — One Million Key Benchmark
 
-| Test | Value size |
-|---|---:|
-| 1 | 1 byte |
-| 2 | 1 KB |
-| 3 | 64 KB |
-| 4 | 256 KB |
-| 5 | 512 KB |
-| 6 | 1 MB |
-
-A batch containing 10,000 PUT operations was also tested.
-
-### Observed Result
-
-```text
-Value-size tests: PASSED
-Batch operations: 10000
-Recovered records: 10006
-Oracle verification: PASSED
-```
-
-The recovered database matched the independent oracle for the tested workload.
-
-## 7. Large Database Recovery Benchmark
-
-A one-million-key benchmark was completed.
+The database was tested with one million keys.
 
 | Measurement | Result |
 |---|---:|
-| Records inserted | 1,000,000 |
+| Number of keys | 1,000,000 |
 | Insertion time | 7.16 seconds |
-| Database size | 56.13 MB |
+| Database file size | 56.13 MB |
 | Recovery time | 1.64 seconds |
-| Recovered records | 1,000,000 |
 
-### Observed Result
+The recovered key count and selected values were checked.
 
-The database recovered one million records in approximately 1.64 seconds in the recorded development environment.
+This was a large-scale recovery benchmark, not a process-killed benchmark at one million keys.
 
-The benchmark checked the recovered record count and selected values. It did not independently compare every stored value.
+### F4 — Final-Byte Truncation
 
-## 8. Atomic Batch Crash Testing
+A dedicated test that truncates exactly the final byte of the database file has not yet been established. Existing incomplete-record and torn-tail tests provide partial coverage of this behavior.
 
-The large-batch crash tests use controlled checkpoints:
+## 10. Additional Large-Data and Batch Testing
 
-- `before_write`
-- `after_sync`
-- `after_commit`
-
-The tests use a child process and terminate it at the selected checkpoint.
-
-### Observed Results
-
-| Checkpoint | Expected state | Result |
-|---|---|---|
-| before_write | Original database state | PASSED |
-| after_sync | Complete batch recovered | PASSED |
-| after_commit | Complete batch recovered | PASSED |
-
-The tested batch recovery preserved the original state before writing and recovered the complete batch after synchronization.
-
-**Limitation:** These checkpoints do not terminate the process at arbitrary positions inside the operating-system write loop.
-
-## 9. Compaction Crash Testing
-
-Compaction is tested at three checkpoints:
-
-| Checkpoint | Expected state | Result |
-|---|---|---|
-| `temp_written` | Original database remains valid | PASSED |
-| `before_replace` | Original database remains valid | PASSED |
-| `after_replace` | New database remains valid | PASSED |
-
-The tests verify that the database can be reopened and that the expected live records remain available after termination at these checkpoints.
-
-## 10. Stale Temporary-File Failure
-
-### 10.1 Bug Discovery
-
-A regression test simulated an interrupted previous compaction by creating a corrupted temporary file:
+The large-data runner tested values of the following sizes:
 
 ```text
-database.db.compact.tmp
+1 byte
+1 KB
+64 KB
+256 KB
+512 KB
+1 MB
 ```
 
-A subsequent compaction appended new records to the existing temporary file.
+A 10,000-operation PUT batch was also tested.
 
-The replacement database contained corrupted leading bytes, and reopening the database caused previously valid keys to disappear.
+Observed results:
 
-### 10.2 Root Cause
+- Recovered records: 10,006
+- Oracle verification: passed
+- Maximum tested value size: 1 MB
 
-The temporary compaction file was opened for append without first removing an existing stale temporary file.
+## 11. Independent Oracle Verification
 
-### 10.3 Fix
+The torture-testing system uses an independent expected-state oracle.
 
-The compaction implementation now removes an existing temporary file before writing a fresh compacted database.
+The oracle compares the expected key-value state with the recovered database state after process termination and restart.
 
-```python
-if os.path.exists(temp_path):
-    os.remove(temp_path)
-```
+This helps detect:
 
-The original database remains authoritative until the new temporary file is ready for replacement.
+- Missing acknowledged writes.
+- Unexpected values.
+- Incorrect DELETE behavior.
+- Partially applied batches.
+- Data corruption caused by incomplete records.
 
-### 10.4 Verification
+## 12. Recovery and Storage Mechanisms
 
-Regression test:
+The implementation uses the following mechanisms to handle failures:
 
-```powershell
-py -m pytest tests/test_compaction.py::test_compaction_replaces_stale_temporary_file -v
-```
+1. Append-only record storage.
+2. CRC32 checksums for record validation.
+3. BEGIN and COMMIT markers for batch transactions.
+4. Recovery-time validation and incomplete-tail truncation.
+5. File synchronization using `fsync`.
+6. File locking for concurrent writers.
+7. Temporary-file-based compaction and atomic replacement.
+8. Configurable maximum database size.
+9. Rollback attempts after failed physical writes.
 
-Observed result:
+These mechanisms are implemented in the database, storage, recovery, and file-locking modules.
 
-```text
-1 passed
-```
+## 13. Known Limitations and Unverified Scenarios
 
-Full compaction tests:
+The following cases should not be claimed as fully verified:
 
-```powershell
-py -m pytest tests/test_compaction.py tests/test_compaction_crash.py -v
-```
+- C4: Process termination inside the operating-system replacement operation.
+- E3: Forced termination exactly when the storage limit is reached.
+- F2: Multiple repeated interruptions during recovery.
+- F3: Process-killed recovery benchmark with one million keys.
+- F4: Dedicated final-byte truncation test.
 
-Observed result:
+Other exclusions from the project specification include:
 
-```text
-7 passed in 4.02s
-```
+- Random corruption of arbitrary middle-of-file bytes.
+- Network-based database access.
+- Sharding or multiple authoritative database files.
+- Multi-batch transactions and advanced isolation levels.
+- Performance guarantees beyond the specified recovery target.
 
-Full test suite after the fix:
+## 14. Final Verification Summary
 
-```text
-36 passed in 10.97s
-```
+The implementation has passed 57 automated tests in the latest full test execution.
 
-Git commit:
+The tests cover:
 
-```text
-0ce712b fix: handle stale compaction temporary files
-```
+- Individual write durability and crash recovery.
+- Atomic batch recovery.
+- Recovery interruption.
+- Crash-safe compaction.
+- Concurrent writers.
+- GET visibility during batch operations.
+- Database size limits.
+- Simulated disk-full failures.
+- Large values and large batches.
+- Random crash testing.
+- One-million-key recovery benchmarking.
 
-## 11. Disk-Full and Size-Limit Testing
+The test results provide evidence of the implemented database's behavior under the tested failure conditions. Scenarios listed as partially verified or unverified remain explicit limitations and should not be represented as proven.
 
-The project includes tests for:
+---
 
-- Configurable database size limits.
-- Rejection of writes exceeding the configured limit.
-- Batch size-limit failures.
-- Preservation of existing data after rejected operations.
-- Recovery after disk-full test conditions.
-
-The storage layer checks the expected append size before writing.
-
-If an append raises an exception after writing begins, it attempts to truncate the file to its original length and synchronize the rollback.
-
-**Limitation:** These tests do not establish that every possible physical disk failure or sudden power loss can be rolled back. Process termination does not execute Python exception handlers.
-
-## 12. Git Verification History
-
-Relevant recorded commits:
-
-```text
-9240a91 Initial project structure
-010d13d Implement basic PUT GET DELETE operations
-3b6c400 Implement append-only storage and recovery
-701224d Add crash recovery and checksum tests
-90b5b02 feat: add atomic batches and concurrency safety
-1af8ea2 feat: add crash-safe database compaction
-ec5fb6a feat: add configurable database size limits
-687d512 test: add 500-iteration random crash torture
-e4766ee test: add concurrent writer torture runner
-0b9d42f test: add large value and batch torture runner
-aa15fc8 test: verify atomic batch crash recovery
-4361ad0 test: add concurrency diagnostic utilities
-0ce712b fix: handle stale compaction temporary files
-aa822a7 docs: add database architecture and scenario proof matrix
-```
-
-## 13. Known Limitations and Remaining Experiments
-
-The following experiments should be completed before claiming full failure coverage:
-
-1. Terminate a process during an actual partial record write.
-2. Terminate a process between writing COMMIT and completing `fsync()`.
-3. Test two writers updating the same key concurrently.
-4. Test GET operations during an active large batch.
-5. Terminate a process during recovery truncation.
-6. Terminate a process during the actual atomic replacement call.
-7. Repeat termination and restart during recovery.
-8. Test compaction failure when the temporary file cannot be fully written.
-9. Test exact one-million-key recovery on the final demonstration computer.
-10. Verify the final database using a complete independent value-by-value comparison.
-
-## 14. Final Assessment
-
-The database has passed its current 36-test automated suite.
-
-The recorded experiments demonstrate:
-
-- Successful recovery of acknowledged writes in the random crash workload.
-- Correct results for the tested concurrent writer workload.
-- Successful recovery of large values and large batches.
-- Recovery of one million records within the recorded benchmark time.
-- Successful compaction recovery at the tested checkpoints.
-- Successful handling of the stale temporary-file regression.
-
-These results provide evidence of the implemented durability, transaction and recovery mechanisms.
-
-However, the remaining experiments listed above must be completed before claiming that every possible crash point and failure condition has been verified.
-
-**Testing principle:** A feature is implemented when its code exists; it is verified only when a test or experiment demonstrates the expected behavior.
+**Latest test result:** `57 passed in 29.44s`

@@ -5,7 +5,7 @@ import tempfile
 import pytest
 
 from src.database import Database
-from src.storage import DatabaseFullError, PUT, encode_record
+from src.storage import DatabaseFullError, PUT, DELETE, encode_record
 
 
 def test_put_respects_maximum_size():
@@ -153,5 +153,65 @@ def test_data_survives_restart_after_failed_write():
 
         assert reopened.get(b"account") == b"active"
         assert reopened.get(b"new_account") is None
+
+        reopened.close()
+
+
+def test_delete_and_compaction_allow_new_writes():
+
+    with tempfile.TemporaryDirectory() as folder:
+
+        path = os.path.join(folder, "test.db")
+
+        # Create the initial database.
+        db = Database(path)
+
+        db.put(b"key1", b"value1")
+        db.put(b"key2", b"value2")
+
+        # Calculate space needed for two DELETE records.
+        current_size = os.path.getsize(path)
+
+        delete_record_size = len(
+            encode_record(DELETE, b"key1", b"")
+        )
+
+        # Allow both deletes, but not another PUT.
+        max_size = current_size + (delete_record_size * 2)
+
+        db.close()
+
+        db = Database(path, max_size=max_size)
+
+        # Delete both records.
+        db.delete(b"key1")
+        db.delete(b"key2")
+
+        size_before_compaction = os.path.getsize(path)
+
+        assert size_before_compaction == max_size
+
+        # Compact to remove obsolete records.
+        db.compact()
+
+        size_after_compaction = os.path.getsize(path)
+
+        assert size_after_compaction < size_before_compaction
+
+        # New writes should now succeed.
+        assert db.put(b"key3", b"value3") is True
+
+        assert db.get(b"key1") is None
+        assert db.get(b"key2") is None
+        assert db.get(b"key3") == b"value3"
+
+        db.close()
+
+        # Verify persistence after restart.
+        reopened = Database(path)
+
+        assert reopened.get(b"key1") is None
+        assert reopened.get(b"key2") is None
+        assert reopened.get(b"key3") == b"value3"
 
         reopened.close()
