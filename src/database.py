@@ -20,8 +20,6 @@ from src.file_lock import FileLock
 
 class Database:
 
-    # Shared locks ensure different Database objects in the same
-    # Python process also coordinate access to the same file.
     _locks_guard = threading.Lock()
     _path_locks = {}
 
@@ -30,11 +28,9 @@ class Database:
         self.path = os.path.abspath(path)
         self.closed = False
 
-        # Create parent directory if necessary.
         directory = os.path.dirname(self.path)
         os.makedirs(directory, exist_ok=True)
 
-        # Get a shared thread lock for this database path.
         normalized_path = os.path.normcase(self.path)
 
         with Database._locks_guard:
@@ -49,19 +45,16 @@ class Database:
         with open(self.path, "ab"):
             pass
 
-        # Recover while holding both locks.
+        # Recover once when opening.
         with self.lock, FileLock(self.path):
             self.data = recover_database(self.path)
+            self._known_size = os.path.getsize(self.path)
 
     @classmethod
     def open(cls, path="data/database.db"):
-        """
-        Open or create a database.
-        """
         return cls(path)
 
     def _check_open(self):
-
         if self.closed:
             raise RuntimeError("Database is closed")
 
@@ -83,14 +76,23 @@ class Database:
         if len(value) > 1024 * 1024:
             raise ValueError("Value cannot exceed 1 MB")
 
-    def _refresh_index(self):
+    def _refresh_index_if_changed(self):
         """
-        Reload the latest committed database state.
+        Refresh only when another process has changed
+        the database file.
 
-        This is necessary because another process may have
-        modified the database after this object was opened.
+        The database is append-only, so normal writes
+        increase the file size.
         """
-        self.data = recover_database(self.path)
+
+        current_size = os.path.getsize(self.path)
+
+        if current_size != self._known_size:
+
+            self.data = recover_database(self.path)
+
+            # Recovery can truncate an incomplete tail.
+            self._known_size = os.path.getsize(self.path)
 
     # --------------------------------------------------
     # PUT
@@ -105,15 +107,16 @@ class Database:
             self._validate_key(key)
             self._validate_value(value)
 
-            # Refresh before modifying the database.
-            self._refresh_index()
+            self._refresh_index_if_changed()
 
             record = encode_record(PUT, key, value)
 
-            # Append and sync before reporting success.
+            # Durably append before updating the index.
             append_record(self.path, record)
 
             self.data[key] = value
+
+            self._known_size = os.path.getsize(self.path)
 
             return True
 
@@ -129,8 +132,7 @@ class Database:
 
             self._validate_key(key)
 
-            # Read the latest committed state from disk.
-            self._refresh_index()
+            self._refresh_index_if_changed()
 
             return self.data.get(key)
 
@@ -146,13 +148,15 @@ class Database:
 
             self._validate_key(key)
 
-            self._refresh_index()
+            self._refresh_index_if_changed()
 
             record = encode_record(DELETE, key)
 
             append_record(self.path, record)
 
             self.data.pop(key, None)
+
+            self._known_size = os.path.getsize(self.path)
 
             return True
 
@@ -161,16 +165,6 @@ class Database:
     # --------------------------------------------------
 
     def batch(self, operations):
-        """
-        Apply multiple PUT and DELETE operations atomically.
-
-        Supported operations:
-
-            ("put", key, value)
-            ("delete", key)
-
-        Maximum operations: 10,000
-        """
 
         with self.lock, FileLock(self.path):
 
@@ -186,13 +180,12 @@ class Database:
                     "Batch must contain 1 to 10000 operations"
                 )
 
-            # Refresh the latest state before the transaction.
-            self._refresh_index()
+            self._refresh_index_if_changed()
 
             records = []
             validated_operations = []
 
-            # Validate every operation before writing anything.
+            # Validate everything before writing.
             for operation in operations:
 
                 if not isinstance(operation, (list, tuple)):
@@ -230,12 +223,8 @@ class Database:
                     )
 
                 else:
+                    raise ValueError("Invalid batch operation")
 
-                    raise ValueError(
-                        "Invalid batch operation"
-                    )
-
-            # Generate a unique transaction ID.
             transaction_id = uuid.uuid4().bytes
 
             operation_count = len(validated_operations)
@@ -245,37 +234,34 @@ class Database:
                 operation_count
             )
 
-            # BEGIN marker.
             begin_record = encode_record(
                 BEGIN,
                 transaction_id,
                 count_bytes
             )
 
-            # COMMIT marker.
             commit_record = encode_record(
                 COMMIT,
                 transaction_id,
                 count_bytes
             )
 
-            # Append BEGIN + operations + COMMIT.
-            # append_records performs fsync before returning.
+            # Write and fsync the complete transaction.
             append_records(
                 self.path,
                 [begin_record] + records + [commit_record]
             )
 
-            # Update the in-memory index only after successful sync.
+            # Update index only after successful append.
             for operation, key, value in validated_operations:
 
                 if operation == PUT:
-
                     self.data[key] = value
 
                 elif operation == DELETE:
-
                     self.data.pop(key, None)
+
+            self._known_size = os.path.getsize(self.path)
 
             return True
 
