@@ -1,369 +1,235 @@
 
 import argparse
-import json
 import shlex
 import sys
 
 from src.database import Database
 
 
-DEFAULT_DB = "data/database.db"
+def open_database(path, max_bytes=None):
+    return Database(path, max_size=max_bytes)
 
 
-# --------------------------------------------------
-# DATABASE OPEN
-# --------------------------------------------------
+def read_batch_file(file_path):
+    operations = []
 
-def open_database(path):
-    return Database(path)
+    with open(file_path, "r", encoding="utf-8") as file:
+        for line_number, line in enumerate(file, start=1):
+            line = line.strip()
 
+            if not line or line.startswith("#"):
+                continue
 
-# --------------------------------------------------
-# OPEN COMMAND
-# --------------------------------------------------
+            try:
+                parts = shlex.split(line)
+            except ValueError as error:
+                raise ValueError(
+                    f"Invalid syntax at batch line {line_number}: {error}"
+                ) from error
+
+            if len(parts) == 3 and parts[0] == "put":
+                operations.append((
+                    "put",
+                    parts[1].encode("utf-8"),
+                    parts[2].encode("utf-8")
+                ))
+
+            elif len(parts) == 2 and parts[0] == "del":
+                operations.append((
+                    "delete",
+                    parts[1].encode("utf-8")
+                ))
+
+            else:
+                raise ValueError(
+                    f"Invalid batch operation at line {line_number}: {line}"
+                )
+
+            if len(operations) > 10000:
+                raise ValueError(
+                    "Batch cannot exceed 10000 operations."
+                )
+
+    if not operations:
+        raise ValueError("Batch file contains no operations.")
+
+    return operations
+
 
 def command_open(args):
-
-    db = open_database(args.db)
+    db = open_database(args.path, args.max_bytes)
 
     try:
-        print("Database opened successfully.")
-        print("Database:", args.db)
+        print("OPEN OK")
+        print("Database:", args.path)
         print("Records:", len(db.data))
-
     finally:
         db.close()
 
 
-# --------------------------------------------------
-# PUT COMMAND
-# --------------------------------------------------
-
 def command_put(args):
-
-    db = open_database(args.db)
+    db = open_database(args.path)
 
     try:
         db.put(
             args.key.encode("utf-8"),
             args.value.encode("utf-8")
         )
-
-        print("PUT successful.")
-
+        print("PUT OK")
     finally:
         db.close()
 
 
-# --------------------------------------------------
-# GET COMMAND
-# --------------------------------------------------
-
 def command_get(args):
-
-    db = open_database(args.db)
+    db = open_database(args.path)
 
     try:
         value = db.get(args.key.encode("utf-8"))
 
         if value is None:
-            print("Key not found.")
+            print("NOT FOUND")
         else:
-            print(
-                "Value:",
-                value.decode("utf-8", errors="replace")
-            )
-
+            print(value.decode("utf-8", errors="replace"))
     finally:
         db.close()
 
 
-# --------------------------------------------------
-# DELETE COMMAND
-# --------------------------------------------------
-
 def command_delete(args):
-
-    db = open_database(args.db)
+    db = open_database(args.path)
 
     try:
         db.delete(args.key.encode("utf-8"))
-
-        print("DELETE successful.")
-
+        print("DELETE OK")
     finally:
         db.close()
 
-
-# --------------------------------------------------
-# BATCH COMMAND
-# --------------------------------------------------
 
 def command_batch(args):
-
-    db = open_database(args.db)
+    operations = read_batch_file(args.file)
+    db = open_database(args.path)
 
     try:
-
-        # Read batch operations from a JSON file.
-        with open(
-            args.operations,
-            "r",
-            encoding="utf-8"
-        ) as file:
-
-            operations = json.load(file)
-
-        if not isinstance(operations, list):
-            raise ValueError(
-                "Batch input must be a JSON list."
-            )
-
-        converted = []
-
-        # Validate and convert operations.
-        for operation in operations:
-
-            if not isinstance(operation, list):
-                raise ValueError(
-                    "Each operation must be a JSON list."
-                )
-
-            if (
-                len(operation) == 3
-                and operation[0] == "put"
-            ):
-
-                converted.append((
-                    "put",
-                    operation[1].encode("utf-8"),
-                    operation[2].encode("utf-8")
-                ))
-
-            elif (
-                len(operation) == 2
-                and operation[0] == "delete"
-            ):
-
-                converted.append((
-                    "delete",
-                    operation[1].encode("utf-8")
-                ))
-
-            else:
-                raise ValueError(
-                    "Invalid batch operation."
-                )
-
-        # Execute atomic batch.
-        db.batch(converted)
-
-        print("BATCH successful.")
-        print("Operations:", len(converted))
-
+        db.batch(operations)
+        print("BATCH OK")
+        print("Operations:", len(operations))
     finally:
         db.close()
 
 
-# --------------------------------------------------
-# DUMP COMMAND
-# --------------------------------------------------
-
 def command_dump(args):
-
-    db = open_database(args.db)
+    db = open_database(args.path)
 
     try:
-
-        print("\nDatabase contents:")
-        print("--------------------------")
-
         for key, value in sorted(db.data.items()):
-
             print(
                 key.decode("utf-8", errors="replace"),
                 "=",
                 value.decode("utf-8", errors="replace")
             )
 
-        print("--------------------------")
         print("Total records:", len(db.data))
-
     finally:
         db.close()
 
-
-# --------------------------------------------------
-# CHECK COMMAND
-# --------------------------------------------------
 
 def command_check(args):
-
-    db = open_database(args.db)
+    db = open_database(args.path)
 
     try:
-
-        print("Database check completed.")
+        print("CHECK OK")
         print("Recovery: successful")
         print("Records:", len(db.data))
-        print("Database:", args.db)
-
     finally:
         db.close()
 
 
-# --------------------------------------------------
-# SERVE COMMAND
-# --------------------------------------------------
-
 def command_serve(args):
+    # The size limit remains active for this entire server session.
+    db = open_database(args.path, args.max_bytes)
 
-    db = open_database(args.db)
-
-    print("\n================================")
-    print("  KILL IT AND PROVE IT DATABASE")
-    print("================================")
-
-    print("Database shell started.")
-    print("Type help for available commands.")
-    print("Type exit to close the database.")
+    print("READY", flush=True)
 
     try:
+        for line in sys.stdin:
+            line = line.strip()
 
-        while True:
-
-            try:
-                command = input("\ndb> ").strip()
-
-            except (EOFError, KeyboardInterrupt):
-
-                print("\nClosing database shell.")
-                break
-
-            if not command:
+            if not line:
                 continue
 
-            if command == "exit":
-                break
-
-            if command == "help":
-
-                print("""
-Available commands:
-
-put <key> <value>
-get <key>
-del <key>
-dump
-check
-help
-exit
-""")
-
-                continue
+            parts = []
+            op_id = "UNKNOWN"
 
             try:
+                parts = shlex.split(line)
 
-                parts = shlex.split(command)
+                if not parts:
+                    continue
 
-                if (
-                    parts[0] == "put"
-                    and len(parts) == 3
-                ):
+                op_id = parts[0]
 
+                if len(parts) < 2:
+                    raise ValueError(
+                        "Expected: <op-id> <put|get|del|batch> ..."
+                    )
+
+                operation = parts[1]
+
+                if operation == "put" and len(parts) == 4:
                     db.put(
-                        parts[1].encode("utf-8"),
-                        parts[2].encode("utf-8")
+                        parts[2].encode("utf-8"),
+                        parts[3].encode("utf-8")
                     )
 
-                    print("PUT successful.")
+                    print(f"ACK {op_id}", flush=True)
 
-                elif (
-                    parts[0] == "get"
-                    and len(parts) == 2
-                ):
-
-                    value = db.get(
-                        parts[1].encode("utf-8")
-                    )
+                elif operation == "get" and len(parts) == 3:
+                    value = db.get(parts[2].encode("utf-8"))
 
                     if value is None:
-                        print("Key not found.")
+                        print(f"NOT_FOUND {op_id}", flush=True)
                     else:
                         print(
-                            value.decode(
-                                "utf-8",
-                                errors="replace"
-                            )
+                            f"VALUE {op_id} "
+                            f"{value.decode('utf-8', errors='replace')}",
+                            flush=True
                         )
 
-                elif (
-                    parts[0] == "del"
-                    and len(parts) == 2
-                ):
+                elif operation == "del" and len(parts) == 3:
+                    db.delete(parts[2].encode("utf-8"))
 
-                    db.delete(
-                        parts[1].encode("utf-8")
-                    )
+                    print(f"ACK {op_id}", flush=True)
 
-                    print("DELETE successful.")
+                elif operation == "batch" and len(parts) == 3:
+                    operations = read_batch_file(parts[2])
+                    db.batch(operations)
 
-                elif (
-                    parts[0] == "dump"
-                    and len(parts) == 1
-                ):
-
-                    for key, value in sorted(db.data.items()):
-
-                        print(
-                            key.decode(
-                                "utf-8",
-                                errors="replace"
-                            ),
-                            "=",
-                            value.decode(
-                                "utf-8",
-                                errors="replace"
-                            )
-                        )
-
-                    print("Total records:", len(db.data))
-
-                elif (
-                    parts[0] == "check"
-                    and len(parts) == 1
-                ):
-
-                    print("Recovery: successful")
-                    print("Records:", len(db.data))
+                    print(f"ACK {op_id}", flush=True)
 
                 else:
-
-                    print(
-                        "Invalid command. Type help."
+                    raise ValueError(
+                        "Invalid operation or arguments."
                     )
 
             except Exception as error:
+                message = (
+                    str(error)
+                    .replace("\r", " ")
+                    .replace("\n", " ")
+                )
 
-                print("Error:", error)
+                print(
+                    f"ERROR {op_id} {message}",
+                    flush=True
+                )
 
     finally:
-
         db.close()
 
-        print("\nDatabase closed.")
-
-
-# --------------------------------------------------
-# MAIN CLI
-# --------------------------------------------------
 
 def main():
-
     parser = argparse.ArgumentParser(
         description=(
-            "Kill It and Prove It - "
-            "Embedded Key-Value Database"
+            "Kill It and Prove It - Embedded Key-Value Database"
         )
     )
 
@@ -373,127 +239,58 @@ def main():
     )
 
     # OPEN
-    open_parser = subparsers.add_parser("open")
-
-    open_parser.add_argument(
-        "--db",
-        default=DEFAULT_DB
-    )
-
-    open_parser.set_defaults(
-        func=command_open
-    )
+    p = subparsers.add_parser("open")
+    p.add_argument("path")
+    p.add_argument("--max-bytes", type=int)
+    p.set_defaults(func=command_open)
 
     # PUT
-    put_parser = subparsers.add_parser("put")
-
-    put_parser.add_argument("key")
-    put_parser.add_argument("value")
-
-    put_parser.add_argument(
-        "--db",
-        default=DEFAULT_DB
-    )
-
-    put_parser.set_defaults(
-        func=command_put
-    )
+    p = subparsers.add_parser("put")
+    p.add_argument("path")
+    p.add_argument("key")
+    p.add_argument("value")
+    p.set_defaults(func=command_put)
 
     # GET
-    get_parser = subparsers.add_parser("get")
-
-    get_parser.add_argument("key")
-
-    get_parser.add_argument(
-        "--db",
-        default=DEFAULT_DB
-    )
-
-    get_parser.set_defaults(
-        func=command_get
-    )
+    p = subparsers.add_parser("get")
+    p.add_argument("path")
+    p.add_argument("key")
+    p.set_defaults(func=command_get)
 
     # DELETE
-    delete_parser = subparsers.add_parser("del")
-
-    delete_parser.add_argument("key")
-
-    delete_parser.add_argument(
-        "--db",
-        default=DEFAULT_DB
-    )
-
-    delete_parser.set_defaults(
-        func=command_delete
-    )
+    p = subparsers.add_parser("del")
+    p.add_argument("path")
+    p.add_argument("key")
+    p.set_defaults(func=command_delete)
 
     # BATCH
-    batch_parser = subparsers.add_parser("batch")
-
-    batch_parser.add_argument(
-        "operations",
-        help="Path to JSON file containing batch operations"
-    )
-
-    batch_parser.add_argument(
-        "--db",
-        default=DEFAULT_DB
-    )
-
-    batch_parser.set_defaults(
-        func=command_batch
-    )
+    p = subparsers.add_parser("batch")
+    p.add_argument("path")
+    p.add_argument("file")
+    p.set_defaults(func=command_batch)
 
     # DUMP
-    dump_parser = subparsers.add_parser("dump")
-
-    dump_parser.add_argument(
-        "--db",
-        default=DEFAULT_DB
-    )
-
-    dump_parser.set_defaults(
-        func=command_dump
-    )
+    p = subparsers.add_parser("dump")
+    p.add_argument("path")
+    p.set_defaults(func=command_dump)
 
     # CHECK
-    check_parser = subparsers.add_parser("check")
-
-    check_parser.add_argument(
-        "--db",
-        default=DEFAULT_DB
-    )
-
-    check_parser.set_defaults(
-        func=command_check
-    )
+    p = subparsers.add_parser("check")
+    p.add_argument("path")
+    p.set_defaults(func=command_check)
 
     # SERVE
-    serve_parser = subparsers.add_parser("serve")
-
-    serve_parser.add_argument(
-        "--db",
-        default=DEFAULT_DB
-    )
-
-    serve_parser.set_defaults(
-        func=command_serve
-    )
+    p = subparsers.add_parser("serve")
+    p.add_argument("path")
+    p.add_argument("--max-bytes", type=int)
+    p.set_defaults(func=command_serve)
 
     args = parser.parse_args()
 
     try:
-
         args.func(args)
-
     except Exception as error:
-
-        print(
-            "Error:",
-            error,
-            file=sys.stderr
-        )
-
+        print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(1)
 
 
