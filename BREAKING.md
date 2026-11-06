@@ -201,23 +201,21 @@ Results:
 
 ## 4. Full Test Suite
 
-The complete pytest suite was executed after the F1–F4 additions and recovery optimization.
+The complete pytest suite was executed after the F1-F4 additions and recovery optimization.
 
 Command:
 
 ```powershell
-python -m pytest -v
+python -m pytest -q
 ```
 
 Final result:
 
 ```text
-collected 61 items
-
-61 passed in 94.34s (0:01:34)
+64 passed in 101.58s
 ```
 
-<escape>**Overall result: 61 tests passed.**</escape>
+**Overall result: 64 tests passed.**
 
 ## 5. Recovery Performance Optimization
 
@@ -231,7 +229,7 @@ After the optimization:
 - Optimized recovery time: 1.7412 seconds
 - Improvement: Approximately 14.8%
 
-The optimized implementation passed the one-million-key recovery test and the complete 61-test suite.
+The optimized implementation passed the one-million-key recovery test and the complete 64-test suite.
 
 ## 6. Known Limitations
 
@@ -269,3 +267,20 @@ The additional F1–F4 tests provide evidence for randomized crash-and-restart b
 The results support the tested durability, atomicity, concurrency, compaction, size-limit, and recovery behaviors. The qualifications in this report identify conditions that have not been fully simulated and should not be represented as proven.
 
 **Final test status: 61 passed.**
+
+## 9. Standalone Torture Launcher Verification
+
+The project provides a standalone launcher for randomized operation testing and process-termination testing.
+
+**Windows command:**
+``powershell
+.\torture.cmd --iterations 500 --seed 42
+``
+
+**Observed result (seed 42):**
+- Crash-test iterations: 500
+- Acknowledged writes: 2,729
+- Recovered records: 2,729
+- Independent oracle verification: PASSED
+
+The runner terminates the writer process between acknowledged operations, then reopens the database and compares recovered data with the independent oracle. This result does not establish recovery from termination during an individual physical write or from sudden power loss.
