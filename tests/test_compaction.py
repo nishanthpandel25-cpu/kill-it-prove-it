@@ -95,3 +95,42 @@ def test_empty_database_compaction():
         assert len(reopened.data) == 0
 
         reopened.close()
+
+
+def test_compaction_replaces_stale_temporary_file():
+
+    with tempfile.TemporaryDirectory() as folder:
+
+        path = os.path.join(folder, "test.db")
+        temp_path = path + ".compact.tmp"
+
+        db = Database(path)
+
+        # Create valid database records.
+        db.put(b"name", b"database")
+        db.put(b"project", b"hackathon")
+
+        # Simulate a leftover temporary file from
+        # an interrupted previous compaction.
+        with open(temp_path, "wb") as file:
+            file.write(b"INCOMPLETE_CORRUPTED_RECORD")
+
+        # Run a new compaction.
+        db.compact()
+
+        # Verify correct in-memory data.
+        assert db.get(b"name") == b"database"
+        assert db.get(b"project") == b"hackathon"
+
+        # The stale temporary file must not remain.
+        assert not os.path.exists(temp_path)
+
+        db.close()
+
+        # Verify recovery after restart.
+        reopened = Database(path)
+
+        assert reopened.get(b"name") == b"database"
+        assert reopened.get(b"project") == b"hackathon"
+
+        reopened.close()

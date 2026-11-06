@@ -18,41 +18,46 @@ from src.recovery import recover_database
 from src.file_lock import FileLock
 
 
-# Test hooks. Normally left as None.
+# --------------------------------------------------
+# TEST HOOKS
+# --------------------------------------------------
+
 COMPACTION_TEST_HOOK = None
 BATCH_TEST_HOOK = None
 
 
 def _compaction_checkpoint(stage):
-    """Test-only checkpoint for compaction crash testing."""
+    """Allow tests to pause compaction at specific stages."""
     if COMPACTION_TEST_HOOK is not None:
         COMPACTION_TEST_HOOK(stage)
 
 
 def _batch_checkpoint(stage):
-    """Test-only checkpoint for batch crash testing."""
+    """Allow tests to pause batch operations at specific stages."""
     if BATCH_TEST_HOOK is not None:
         BATCH_TEST_HOOK(stage)
 
+
+# --------------------------------------------------
+# DATABASE ENGINE
+# --------------------------------------------------
 
 class Database:
 
     def __init__(self, path="data/database.db", max_size=None):
 
         if max_size is not None:
-            if not isinstance(max_size, int) or isinstance(max_size, bool):
-                raise TypeError("max_size must be an integer")
-
-            if max_size < 0:
-                raise ValueError("max_size cannot be negative")
+            if (
+                not isinstance(max_size, int)
+                or isinstance(max_size, bool)
+                or max_size < 0
+            ):
+                raise ValueError(
+                    "max_size must be a non-negative integer or None"
+                )
 
         self.path = os.path.abspath(path)
         self.max_size = max_size
-
-        self.data = {}
-        self.closed = False
-
-        self.lock = threading.RLock()
 
         directory = os.path.dirname(self.path)
 
@@ -63,9 +68,16 @@ class Database:
             with open(self.path, "wb"):
                 pass
 
+        self.data = {}
+        self.closed = False
+
+        # Thread-level synchronization.
+        self.lock = threading.RLock()
+
+        # Recover the database while holding the process lock.
         with self.lock, FileLock(self.path):
             self.data = recover_database(self.path)
-            self._known_signature = self._get_file_signature()
+            self._file_signature = self._get_file_signature()
 
     # --------------------------------------------------
     # FILE SIGNATURE
@@ -78,27 +90,22 @@ class Database:
         return (
             stat.st_size,
             stat.st_mtime_ns,
-            stat.st_ctime_ns
+            stat.st_ctime_ns,
         )
 
     def _refresh_index_if_changed(self):
 
         current_signature = self._get_file_signature()
 
-        if current_signature != self._known_signature:
+        if current_signature != self._file_signature:
 
             self.data = recover_database(self.path)
 
-            self._known_signature = self._get_file_signature()
+            self._file_signature = self._get_file_signature()
 
     # --------------------------------------------------
     # VALIDATION
     # --------------------------------------------------
-
-    def _check_open(self):
-
-        if self.closed:
-            raise RuntimeError("Database is closed")
 
     def _validate_key(self, key):
 
@@ -128,7 +135,8 @@ class Database:
 
         with self.lock, FileLock(self.path):
 
-            self._check_open()
+            if self.closed:
+                raise RuntimeError("Database is closed")
 
             self._validate_key(key)
             self._validate_value(value)
@@ -140,12 +148,12 @@ class Database:
             append_record(
                 self.path,
                 record,
-                max_size=self.max_size
+                max_size=self.max_size,
             )
 
             self.data[key] = value
 
-            self._known_signature = self._get_file_signature()
+            self._file_signature = self._get_file_signature()
 
             return True
 
@@ -157,7 +165,8 @@ class Database:
 
         with self.lock, FileLock(self.path):
 
-            self._check_open()
+            if self.closed:
+                raise RuntimeError("Database is closed")
 
             self._validate_key(key)
 
@@ -173,7 +182,8 @@ class Database:
 
         with self.lock, FileLock(self.path):
 
-            self._check_open()
+            if self.closed:
+                raise RuntimeError("Database is closed")
 
             self._validate_key(key)
 
@@ -184,12 +194,12 @@ class Database:
             append_record(
                 self.path,
                 record,
-                max_size=self.max_size
+                max_size=self.max_size,
             )
 
             self.data.pop(key, None)
 
-            self._known_signature = self._get_file_signature()
+            self._file_signature = self._get_file_signature()
 
             return True
 
@@ -201,7 +211,8 @@ class Database:
 
         with self.lock, FileLock(self.path):
 
-            self._check_open()
+            if self.closed:
+                raise RuntimeError("Database is closed")
 
             if not isinstance(operations, (list, tuple)):
                 raise TypeError(
@@ -210,21 +221,19 @@ class Database:
 
             if not 1 <= len(operations) <= 10000:
                 raise ValueError(
-                    "Batch must contain 1 to 10000 operations"
+                    "Batch must contain between 1 and 10000 operations"
                 )
 
             self._refresh_index_if_changed()
 
-            records = []
+            encoded_operations = []
             validated_operations = []
 
-            # Validate all operations before writing.
+            # Validate the complete batch before writing anything.
             for operation in operations:
 
                 if not isinstance(operation, (list, tuple)):
-                    raise TypeError(
-                        "Each operation must be a tuple or list"
-                    )
+                    raise ValueError("Invalid batch operation")
 
                 if len(operation) == 3 and operation[0] == "put":
 
@@ -233,12 +242,12 @@ class Database:
                     self._validate_key(key)
                     self._validate_value(value)
 
-                    records.append(
+                    encoded_operations.append(
                         encode_record(PUT, key, value)
                     )
 
                     validated_operations.append(
-                        (PUT, key, value)
+                        ("put", key, value)
                     )
 
                 elif len(operation) == 2 and operation[0] == "delete":
@@ -247,67 +256,73 @@ class Database:
 
                     self._validate_key(key)
 
-                    records.append(
+                    encoded_operations.append(
                         encode_record(DELETE, key)
                     )
 
                     validated_operations.append(
-                        (DELETE, key, b"")
+                        ("delete", key)
                     )
 
                 else:
-                    raise ValueError("Invalid batch operation")
+                    raise ValueError(
+                        "Operation must be ('put', key, value) "
+                        "or ('delete', key)"
+                    )
 
+            # Generate a unique transaction ID.
             transaction_id = uuid.uuid4().bytes
 
-            operation_count = len(validated_operations)
-
-            count_bytes = struct.pack(
+            operation_count = struct.pack(
                 ">I",
-                operation_count
+                len(encoded_operations),
             )
 
             begin_record = encode_record(
                 BEGIN,
                 transaction_id,
-                count_bytes
+                operation_count,
             )
 
             commit_record = encode_record(
                 COMMIT,
                 transaction_id,
-                count_bytes
+                operation_count,
             )
 
-            complete_transaction = (
-                [begin_record] + records + [commit_record]
+            # The complete transaction is appended and synchronized
+            # before the in-memory index is modified.
+            transaction_records = (
+                [begin_record]
+                + encoded_operations
+                + [commit_record]
             )
 
-            # Checkpoint 1: before transaction bytes are written.
             _batch_checkpoint("before_write")
 
-            # Append and fsync the complete transaction.
             append_records(
                 self.path,
-                complete_transaction,
-                max_size=self.max_size
+                transaction_records,
+                max_size=self.max_size,
             )
 
-            # Checkpoint 2: the complete transaction is durable.
             _batch_checkpoint("after_sync")
 
-            # Update memory only after successful durable append.
-            for operation, key, value in validated_operations:
+            # Apply operations in their original order.
+            for operation in validated_operations:
 
-                if operation == PUT:
+                if operation[0] == "put":
+
+                    _, key, value = operation
                     self.data[key] = value
 
-                elif operation == DELETE:
+                elif operation[0] == "delete":
+
+                    _, key = operation
                     self.data.pop(key, None)
 
-            self._known_signature = self._get_file_signature()
+            self._file_signature = self._get_file_signature()
 
-            # Checkpoint 3: in-memory state has been updated.
             _batch_checkpoint("after_commit")
 
             return True
@@ -320,7 +335,8 @@ class Database:
 
         with self.lock, FileLock(self.path):
 
-            self._check_open()
+            if self.closed:
+                raise RuntimeError("Database is closed")
 
             self._refresh_index_if_changed()
 
@@ -330,35 +346,54 @@ class Database:
 
             try:
 
+                # STEP 1:
+                # Remove a temporary file left by an interrupted
+                # previous compaction.
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+                # STEP 2:
+                # Create records only for currently active keys.
                 compacted_records = [
                     encode_record(PUT, key, value)
                     for key, value in self.data.items()
                 ]
 
+                # STEP 3:
+                # Write to a fresh temporary database file.
                 append_records(
                     temp_path,
                     compacted_records,
-                    max_size=self.max_size
+                    max_size=self.max_size,
                 )
 
                 _compaction_checkpoint("temp_written")
 
                 new_size = os.path.getsize(temp_path)
 
+                # STEP 4:
+                # The original database remains untouched
+                # until the temporary file is complete.
                 _compaction_checkpoint("before_replace")
 
+                # STEP 5:
+                # Atomically replace the original database.
                 os.replace(temp_path, self.path)
 
                 _compaction_checkpoint("after_replace")
 
-                # Sync the containing directory on POSIX systems.
-                if os.name == "posix":
+                # STEP 6:
+                # Synchronize the directory entry on POSIX.
+                if os.name != "nt":
 
-                    directory = os.path.dirname(self.path) or "."
+                    directory = os.path.dirname(self.path)
+
+                    if not directory:
+                        directory = "."
 
                     directory_fd = os.open(
                         directory,
-                        os.O_RDONLY
+                        os.O_RDONLY,
                     )
 
                     try:
@@ -366,16 +401,20 @@ class Database:
                     finally:
                         os.close(directory_fd)
 
-                self._known_signature = self._get_file_signature()
+                # STEP 7:
+                # Update the file signature.
+                self._file_signature = self._get_file_signature()
 
                 return {
                     "old_size": old_size,
                     "new_size": new_size,
-                    "bytes_saved": old_size - new_size
+                    "bytes_saved": old_size - new_size,
                 }
 
             finally:
 
+                # Clean up temporary files after normal completion
+                # or an exception.
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
 
@@ -385,5 +424,30 @@ class Database:
 
     def close(self):
 
-        with self.lock:
+        with self.lock, FileLock(self.path):
+
+            if self.closed:
+                return
+
+            self._refresh_index_if_changed()
+
             self.closed = True
+
+            return True
+
+    # --------------------------------------------------
+    # CONTEXT MANAGER SUPPORT
+    # --------------------------------------------------
+
+    def __enter__(self):
+
+        if self.closed:
+            raise RuntimeError("Database is closed")
+
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+
+        self.close()
+
+        return False
