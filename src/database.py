@@ -5,100 +5,71 @@ import threading
 import uuid
 
 from src.storage import (
-    append_record,
-    append_records,
-    encode_record,
     PUT,
     DELETE,
     BEGIN,
-    COMMIT
+    COMMIT,
+    encode_record,
+    append_record,
+    append_records,
 )
 
 from src.recovery import recover_database
 from src.file_lock import FileLock
 
 
-# --------------------------------------------------
-# TEST-ONLY COMPACTION HOOK
-# --------------------------------------------------
-
+# Test hooks. Normally left as None.
 COMPACTION_TEST_HOOK = None
+BATCH_TEST_HOOK = None
 
 
 def _compaction_checkpoint(stage):
-
+    """Test-only checkpoint for compaction crash testing."""
     if COMPACTION_TEST_HOOK is not None:
         COMPACTION_TEST_HOOK(stage)
 
 
-# --------------------------------------------------
-# DATABASE CLASS
-# --------------------------------------------------
+def _batch_checkpoint(stage):
+    """Test-only checkpoint for batch crash testing."""
+    if BATCH_TEST_HOOK is not None:
+        BATCH_TEST_HOOK(stage)
+
 
 class Database:
 
-    _locks_guard = threading.Lock()
-    _path_locks = {}
-
     def __init__(self, path="data/database.db", max_size=None):
 
-        self.path = os.path.abspath(path)
-        self.closed = False
-
-        # None means unlimited database file size.
         if max_size is not None:
-
             if not isinstance(max_size, int) or isinstance(max_size, bool):
-                raise TypeError("max_size must be an integer or None")
+                raise TypeError("max_size must be an integer")
 
             if max_size < 0:
                 raise ValueError("max_size cannot be negative")
 
+        self.path = os.path.abspath(path)
         self.max_size = max_size
 
+        self.data = {}
+        self.closed = False
+
+        self.lock = threading.RLock()
+
         directory = os.path.dirname(self.path)
-        os.makedirs(directory, exist_ok=True)
 
-        normalized_path = os.path.normcase(self.path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
 
-        with Database._locks_guard:
+        if not os.path.exists(self.path):
+            with open(self.path, "wb"):
+                pass
 
-            if normalized_path not in Database._path_locks:
-
-                Database._path_locks[normalized_path] = (
-                    threading.RLock()
-                )
-
-            self.lock = Database._path_locks[normalized_path]
-
-        # Ensure database file exists.
-        with open(self.path, "ab"):
-            pass
-
-        # Recover existing database.
         with self.lock, FileLock(self.path):
-
             self.data = recover_database(self.path)
-
             self._known_signature = self._get_file_signature()
 
     # --------------------------------------------------
-    # OPEN
+    # FILE SIGNATURE
     # --------------------------------------------------
-
-    @classmethod
-    def open(cls, path="data/database.db", max_size=None):
-
-        return cls(path, max_size=max_size)
-
-    # --------------------------------------------------
-    # INTERNAL HELPERS
-    # --------------------------------------------------
-
-    def _check_open(self):
-
-        if self.closed:
-            raise RuntimeError("Database is closed")
 
     def _get_file_signature(self):
 
@@ -120,15 +91,23 @@ class Database:
 
             self._known_signature = self._get_file_signature()
 
+    # --------------------------------------------------
+    # VALIDATION
+    # --------------------------------------------------
+
+    def _check_open(self):
+
+        if self.closed:
+            raise RuntimeError("Database is closed")
+
     def _validate_key(self, key):
 
         if not isinstance(key, bytes):
             raise TypeError("Key must be bytes")
 
         if not 1 <= len(key) <= 1024:
-
             raise ValueError(
-                "Key must contain between 1 and 1024 bytes"
+                "Key length must be between 1 and 1024 bytes"
             )
 
     def _validate_value(self, value):
@@ -137,8 +116,9 @@ class Database:
             raise TypeError("Value must be bytes")
 
         if len(value) > 1024 * 1024:
-
-            raise ValueError("Value cannot exceed 1 MB")
+            raise ValueError(
+                "Value cannot exceed 1 MB"
+            )
 
     # --------------------------------------------------
     # PUT
@@ -157,15 +137,12 @@ class Database:
 
             record = encode_record(PUT, key, value)
 
-            # The storage layer checks the size limit
-            # before writing anything.
             append_record(
                 self.path,
                 record,
                 max_size=self.max_size
             )
 
-            # Update memory only after successful write.
             self.data[key] = value
 
             self._known_signature = self._get_file_signature()
@@ -227,13 +204,11 @@ class Database:
             self._check_open()
 
             if not isinstance(operations, (list, tuple)):
-
                 raise TypeError(
                     "Operations must be a list or tuple"
                 )
 
             if not 1 <= len(operations) <= 10000:
-
                 raise ValueError(
                     "Batch must contain 1 to 10000 operations"
                 )
@@ -247,7 +222,6 @@ class Database:
             for operation in operations:
 
                 if not isinstance(operation, (list, tuple)):
-
                     raise TypeError(
                         "Each operation must be a tuple or list"
                     )
@@ -282,7 +256,6 @@ class Database:
                     )
 
                 else:
-
                     raise ValueError("Invalid batch operation")
 
             transaction_id = uuid.uuid4().bytes
@@ -310,26 +283,32 @@ class Database:
                 [begin_record] + records + [commit_record]
             )
 
-            # Check and append the entire transaction together.
-            # If it exceeds max_size, nothing is written.
+            # Checkpoint 1: before transaction bytes are written.
+            _batch_checkpoint("before_write")
+
+            # Append and fsync the complete transaction.
             append_records(
                 self.path,
                 complete_transaction,
                 max_size=self.max_size
             )
 
-            # Update memory only after successful append.
+            # Checkpoint 2: the complete transaction is durable.
+            _batch_checkpoint("after_sync")
+
+            # Update memory only after successful durable append.
             for operation, key, value in validated_operations:
 
                 if operation == PUT:
-
                     self.data[key] = value
 
                 elif operation == DELETE:
-
                     self.data.pop(key, None)
 
             self._known_signature = self._get_file_signature()
+
+            # Checkpoint 3: in-memory state has been updated.
+            _batch_checkpoint("after_commit")
 
             return True
 
@@ -345,31 +324,17 @@ class Database:
 
             self._refresh_index_if_changed()
 
+            temp_path = self.path + ".compact.tmp"
+
             old_size = os.path.getsize(self.path)
-
-            directory = os.path.dirname(self.path)
-
-            temp_path = os.path.join(
-                directory,
-                os.path.basename(self.path)
-                + "."
-                + uuid.uuid4().hex
-                + ".compact.tmp"
-            )
 
             try:
 
-                # Encode only currently active records.
                 compacted_records = [
-
                     encode_record(PUT, key, value)
-
                     for key, value in self.data.items()
-
                 ]
 
-                # The completed compacted file must also
-                # respect the configured maximum size.
                 append_records(
                     temp_path,
                     compacted_records,
@@ -382,13 +347,14 @@ class Database:
 
                 _compaction_checkpoint("before_replace")
 
-                # Replace original only after successful write.
                 os.replace(temp_path, self.path)
 
                 _compaction_checkpoint("after_replace")
 
-                # Sync directory entry on POSIX systems.
-                if os.name != "nt":
+                # Sync the containing directory on POSIX systems.
+                if os.name == "posix":
+
+                    directory = os.path.dirname(self.path) or "."
 
                     directory_fd = os.open(
                         directory,
@@ -396,11 +362,8 @@ class Database:
                     )
 
                     try:
-
                         os.fsync(directory_fd)
-
                     finally:
-
                         os.close(directory_fd)
 
                 self._known_signature = self._get_file_signature()
@@ -414,7 +377,6 @@ class Database:
             finally:
 
                 if os.path.exists(temp_path):
-
                     os.remove(temp_path)
 
     # --------------------------------------------------
@@ -424,9 +386,4 @@ class Database:
     def close(self):
 
         with self.lock:
-
-            if not self.closed:
-
-                self.closed = True
-
-            return True
+            self.closed = True
