@@ -609,12 +609,12 @@ Latest recorded result:
 
 | Metric | Result |
 |---|---:|
-| Tests collected | 61 |
-| Tests passed | 61 |
+| Tests collected | 64 |
+| Tests passed | 64 |
 | Tests failed | 0 |
-| Execution time | 94.34 seconds |
+| Execution time | 101.58 seconds |
 
-**Result: 61 passed in 94.34 seconds.**
+**Result: 64 passed in 101.58 seconds.**
 
 This result was recorded on Windows with Python 3.14.0 and pytest 9.2.0.
 
@@ -676,7 +676,7 @@ Kill-It-and-Prove-It/
 |   +-- test_final_byte_truncation.py
 |   +-- benchmark_database.py
 |
-+-- torture/
++-- torture_tests/
 |   +-- generator.py
 |   +-- oracle.py
 |   +-- runner.py
@@ -694,3 +694,19 @@ Kill-It-and-Prove-It/
 ---
 
 **End of Architecture Document**
+
+### 12.3 Standalone Torture Launcher Verification
+
+The project provides two independently selectable torture-test modes.
+
+Randomized operation testing: `python torture.py --mode random --iterations 500 --seed 42`
+
+Windows crash-torture testing: `.\torture.cmd --iterations 500 --seed 42`
+
+Observed crash-torture result (seed 42):
+- Iterations: 500
+- Acknowledged writes: 2,729
+- Recovered records: 2,729
+- Independent oracle verification: passed
+
+The crash runner terminates the writer process between acknowledged operations and verifies that acknowledged data survives reopening. This test does not claim to simulate power loss or termination during an individual physical write.
