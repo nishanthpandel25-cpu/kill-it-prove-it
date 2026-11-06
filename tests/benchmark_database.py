@@ -79,4 +79,4 @@ def run_benchmark(record_count=100000, batch_size=1000):
 
 
 if __name__ == "__main__":
-    run_benchmark(100000, 1000)
+    run_benchmark(1000000, 1000)
