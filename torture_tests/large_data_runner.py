@@ -3,7 +3,7 @@ import os
 import tempfile
 
 from src.database import Database
-from torture.oracle import Oracle
+from torture_tests.oracle import Oracle
 
 
 MAX_VALUE_SIZE = 1024 * 1024

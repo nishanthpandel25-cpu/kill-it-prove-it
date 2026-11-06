@@ -3,7 +3,7 @@ import multiprocessing
 import random
 
 from src.database import Database
-from torture.oracle import Oracle
+from torture_tests.oracle import Oracle
 
 
 ITERATIONS = 500

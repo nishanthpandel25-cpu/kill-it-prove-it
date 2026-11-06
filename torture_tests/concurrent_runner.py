@@ -5,7 +5,7 @@ import random
 import tempfile
 
 from src.database import Database
-from torture.oracle import Oracle
+from torture_tests.oracle import Oracle
 
 
 def writer_process(path, worker_id, operations, result_queue):
