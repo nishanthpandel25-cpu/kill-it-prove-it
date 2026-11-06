@@ -290,7 +290,7 @@ Additional technical documentation is available in:
 
 The current implementation provides a Python database API and a basic `main.py` demonstration.
 
-A separate interactive CLI with commands such as `put`, `get`, `del`, `batch`, `dump`, `check` and `serve` is not yet documented as implemented.
+The command-line interface is implemented in `main.py` and provides eight commands: `open`, `put`, `get`, `del`, `batch`, `dump`, `check` and `serve`. The `serve` command supports an interactive stdin command loop and returns acknowledgements after successful durable operations.
 
 Further testing is required for exact termination points during physical writes, recovery interruptions and other remaining failure scenarios. See `BREAKING.md` for the verification details.
 
