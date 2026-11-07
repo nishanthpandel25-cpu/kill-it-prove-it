@@ -1,8 +1,8 @@
 # Kill It and Prove It
 
-A lightweight, embedded key-value database engine built from scratch using Python.
+A lightweight, embedded, single-process key-value database engine built from scratch using Python.
 
-The project focuses on persistent storage, atomic batch operations, concurrent access, crash recovery and crash-safe compaction.
+The project focuses on persistent storage, atomic batch operations, concurrent access, crash recovery, and crash-safe compaction. Its reliability is evaluated through automated tests and process-crash torture testing.
 
 ## 1. Project Overview
 
@@ -10,36 +10,60 @@ Kill It and Prove It is a custom database engine that stores key-value pairs in 
 
 It uses an append-only storage architecture and an in-memory hash index to provide efficient access to stored records.
 
-The database is designed to recover its state after unexpected process termination and to maintain transaction consistency during batch operations.
+The database is designed to:
+
+- Preserve acknowledged writes across process crashes.
+- Execute batches atomically.
+- Support concurrent database access.
+- Recover incomplete operations after unexpected termination.
+- Compact the database without losing committed data.
+- Detect corrupted or incomplete storage records.
+
+The implementation uses Python standard-library modules for storage, synchronization, locking, and recovery.
 
 ## 2. Features
 
-- PUT: Insert or update key-value pairs.
-- GET: Retrieve values using keys.
-- DELETE: Delete stored keys.
-- BATCH: Execute multiple operations atomically.
-- OPEN: Open the database and recover its state.
-- CLOSE: Close the database.
-- Crash recovery using binary log replay.
+### Database operations
+
+- **PUT:** Insert or update a key-value pair.
+- **GET:** Retrieve a value using its key.
+- **DELETE:** Remove a key.
+- **BATCH:** Execute multiple operations atomically.
+- **OPEN:** Open a database and recover its state.
+- **CLOSE:** Close the database.
+
+### Storage and reliability
+
+- Append-only binary storage.
 - CRC32 record integrity checks.
+- Transaction records using BEGIN and COMMIT.
+- Recovery through binary log replay.
 - Thread-level synchronization.
 - Cross-process file locking.
 - Crash-safe compaction.
 - Configurable maximum database file size.
-- Support for values up to 1 MB.
-- Support for batches containing up to 10,000 operations.
-- Independent oracle-based testing.
+- Rollback protection for failed writes.
+- Fail-stop behaviour when rollback cannot be confirmed.
+
+### Supported limits
+
+| Requirement | Limit |
+|---|---:|
+| Key size | 1–1024 bytes |
+| Value size | Up to 1 MB |
+| Number of keys | At least 1 million |
+| Operations per batch | Up to 10,000 |
 
 ## 3. Technology Stack
 
 | Technology | Purpose |
 |---|---|
 | Python 3 | Database implementation |
-| Python standard library | Storage, locking and synchronization |
+| Python standard library | Storage, locking, synchronization and recovery |
 | pytest | Automated testing |
 | Git | Version control |
 
-No external database engine such as SQLite, MongoDB, Redis or RocksDB is used.
+No external database engine or storage library such as SQLite, MongoDB, Redis, or RocksDB is used.
 
 ## 4. Project Structure
 
@@ -51,38 +75,45 @@ Kill-It-and-Prove-It/
 │   ├── database.py
 │   ├── storage.py
 │   ├── recovery.py
-│   └── file_lock.py
+│   ├── file_lock.py
+│   ├── compaction.py
+│   ├── index.py
+│   └── transaction.py
 │
 ├── tests/
 │   ├── test_basic.py
 │   ├── test_batch.py
-│   ├── test_crash_recovery.py
 │   ├── test_concurrency.py
 │   ├── test_thread_concurrency.py
 │   ├── test_crash_durability.py
+│   ├── test_crash_recovery.py
 │   ├── test_compaction.py
 │   ├── test_compaction_crash.py
+│   ├── test_compaction_replace_race.py
 │   ├── test_size_limits.py
 │   ├── test_disk_full.py
 │   ├── test_large_batch_crash.py
-│   └── benchmark_database.py
+│   ├── test_large_value_crash.py
+│   └── ...
 │
-├── torture/
+├── torture_tests/
 │   ├── generator.py
 │   ├── oracle.py
 │   ├── runner.py
 │   ├── crash_runner.py
 │   ├── concurrent_runner.py
-│   └── large_data_runner.py
-│
-├── diagnostics/
-│   ├── check_concurrency.py
-│   └── test_mutex.py
-│
-├── diagrams/
-├── data/
+│   ├── large_data_runner.py
+│   ├── process_harness.py
+│   ├── process_crash_runner.py
+│   ├── process_batch_crash_runner.py
+│   ├── process_large_crash_runner.py
+│   ├── process_compaction_crash_runner.py
+│   ├── process_recovery_crash_runner.py
+│   └── process_disk_full_runner.py
 │
 ├── main.py
+├── torture.py
+├── batch.json
 ├── README.md
 ├── ARCHITECTURE.md
 ├── BREAKING.md
@@ -90,34 +121,37 @@ Kill-It-and-Prove-It/
 └── .gitignore
 ```
 
+The `tests/` directory contains additional focused tests beyond the examples shown above.
+
 ## 5. Installation
 
 ### Requirements
 
 - Python 3.10 or later.
 - Git.
-- Windows, Linux or macOS.
+- Windows, Linux, or macOS.
+- pytest for running automated tests.
+
+The database runtime itself uses only Python standard-library modules.
 
 ### Step 1: Clone the repository
 
-```bash
+```powershell
 git clone <YOUR_GITHUB_REPOSITORY_URL>
 ```
 
-Replace the placeholder with your actual GitHub repository URL.
+Replace the placeholder with your actual repository URL.
 
 ### Step 2: Enter the project directory
 
-```bash
+```powershell
 cd Kill-It-and-Prove-It
 ```
 
 ### Step 3: Create a virtual environment
 
-Windows:
-
 ```powershell
-py -m venv .venv
+python -m venv .venv
 ```
 
 ### Step 4: Activate the virtual environment
@@ -129,40 +163,120 @@ py -m venv .venv
 ### Step 5: Install pytest
 
 ```powershell
-py -m pip install pytest
+python -m pip install pytest
 ```
 
-The database runtime itself uses Python standard-library modules.
+## 6. Command-Line Interface
 
-## 6. Running the Database
+The command-line interface is implemented in `main.py`.
 
-The current `main.py` demonstrates opening the database, retrieving values and closing it.
+### Available commands
 
-Run:
+| Command | Purpose |
+|---|---|
+| `open` | Open a database and perform recovery |
+| `put` | Insert or update a key |
+| `get` | Retrieve a key |
+| `del` | Delete a key |
+| `batch` | Execute operations from a batch file |
+| `dump` | Display stored records |
+| `check` | Verify database recovery and consistency |
+| `serve` | Start an interactive command server |
+
+### 6.1 Open a database
 
 ```powershell
-py main.py
+python main.py open data/database.db
 ```
 
-The demonstration reads:
+Configure a maximum file size:
 
-```python
-from src.database import Database
-
-db = Database("data/database.db")
-
-print("Name:", db.get(b"name"))
-print("Age:", db.get(b"age"))
-print("College:", db.get(b"college"))
-
-db.close()
+```powershell
+python main.py open data/database.db --max-bytes 10485760
 ```
 
-If these keys have not previously been inserted, their values will be `None`.
+### 6.2 Insert a record
+
+```powershell
+python main.py put data/database.db name Nishanth
+```
+
+### 6.3 Retrieve a record
+
+```powershell
+python main.py get data/database.db name
+```
+
+### 6.4 Delete a record
+
+```powershell
+python main.py del data/database.db name
+```
+
+### 6.5 Execute a batch
+
+Create a text file containing operations:
+
+```text
+put name Nishanth
+put college SIT
+del temporary_key
+```
+
+Execute the batch:
+
+```powershell
+python main.py batch data/database.db batch.txt
+```
+
+The batch file supports line-oriented `put` and `del` operations. Empty lines and comments are skipped.
+
+### 6.6 Dump database contents
+
+```powershell
+python main.py dump data/database.db
+```
+
+### 6.7 Check database integrity
+
+```powershell
+python main.py check data/database.db
+```
+
+### 6.8 Start the interactive server
+
+```powershell
+python main.py serve data/database.db
+```
+
+The server prints `READY` when it starts.
+
+Example input:
+
+```text
+op1 put name Nishanth
+op2 get name
+op3 del name
+op4 get name
+```
+
+Example responses:
+
+```text
+READY
+ACK op1
+VALUE op2 Nishanth
+ACK op3
+NOT_FOUND op4
+```
+
+The server returns an acknowledgement only after the requested write operation has completed successfully and its durability operation has returned.
+
+For a batch, the server accepts the batch operation through its command protocol.
 
 ## 7. Using the Database API
 
-The database can also be used directly from other Python programs.
+The database can also be accessed directly from Python programs.
 
 ### 7.1 Create or open a database
 
@@ -172,19 +286,18 @@ from src.database import Database
 db = Database("data/database.db")
 ```
 
-### 7.2 Insert a record
+### 7.2 Insert records
 
 ```python
 db.put(b"name", b"Nishanth")
 db.put(b"age", b"20")
-db.put(b"college", b"Srinivas Institute of Technology")
+db.put(b"college", b"SIT")
 ```
 
 ### 7.3 Retrieve a record
 
 ```python
 name = db.get(b"name")
-
 print(name)
 ```
 
@@ -205,7 +318,7 @@ db.batch([
 ])
 ```
 
-The batch is represented using BEGIN and COMMIT transaction records.
+The batch is represented using BEGIN and COMMIT transaction records. Recovery applies only committed transactions.
 
 ### 7.6 Close the database
 
@@ -224,75 +337,185 @@ db = Database(
 
 This example configures a maximum database file size of 10 MB.
 
-## 8. Running Tests
+The maximum size is a configuration for the database instance; it is not automatically persisted as database metadata.
 
-Run the complete automated test suite:
+## 8. Running Automated Tests
 
-```powershell
-py -m pytest -q
-```
-
-Run individual test modules:
+Run the complete test suite:
 
 ```powershell
-py -m pytest tests/test_basic.py -v
+python -m pytest -q
 ```
+
+Run an individual test module:
 
 ```powershell
-py -m pytest tests/test_batch.py -v
+python -m pytest tests/test_basic.py -v
 ```
+
+Run batch and compaction tests:
 
 ```powershell
-py -m pytest tests/test_compaction.py tests/test_compaction_crash.py -v
+python -m pytest tests/test_batch.py tests/test_compaction.py tests/test_compaction_crash.py -v
 ```
 
-## 9. Testing and Benchmarking
+## 9. Torture Testing
 
-The project includes several testing utilities.
+The project includes a dedicated torture-test launcher:
 
-| Tool | Purpose |
+```powershell
+python torture.py --help
+```
+
+The launcher provides seven modes.
+
+| Mode | Purpose |
 |---|---|
-| `torture/runner.py` | Randomized database operation testing |
-| `torture/crash_runner.py` | Repeated crash and restart testing |
-| `torture/concurrent_runner.py` | Concurrent process testing |
-| `torture/large_data_runner.py` | Large values and batch testing |
-| `torture/oracle.py` | Independent expected-state verification |
-| `tests/benchmark_database.py` | Large database performance testing |
+| `random` | Concurrent random operations with process termination and oracle verification |
+| `crash` | Randomized crash and restart testing |
+| `compaction` | Process termination at compaction checkpoints |
+| `recovery-crash` | Process termination during recovery checkpoints |
+| `large-values` | Crash testing involving values up to 1 MB |
+| `large-batch` | Crash testing involving batches of 10,000 operations |
+| `disk-full` | Database capacity-limit and failed-operation verification |
 
-Use the test scripts according to their implemented command-line arguments.
+### 9.1 Random process-crash testing
 
-## 10. Recorded Performance Results
+```powershell
+python torture.py --iterations 500 --seed 12345 --workers 4
+```
 
-The following results were recorded during development:
+This mode uses concurrent writers, random PUT, DELETE and BATCH operations, random-delay process termination, an independent oracle, and post-recovery verification.
+
+### 9.2 Random crash testing
+
+```powershell
+python torture.py --iterations 100 --seed 42 --mode crash
+```
+
+### 9.3 Compaction crash testing
+
+```powershell
+python torture.py --iterations 100 --seed 7 --mode compaction
+```
+
+### 9.4 Recovery crash testing
+
+```powershell
+python torture.py --iterations 100 --seed 42 --mode recovery-crash
+```
+
+### 9.5 Large-value crash testing
+
+```powershell
+python torture.py --iterations 100 --seed 999 --mode large-values
+```
+
+### 9.6 Large-batch crash testing
+
+```powershell
+python torture.py --iterations 100 --seed 42 --mode large-batch
+```
+
+This mode requires exactly two workers.
+
+### 9.7 Disk-full testing
+
+```powershell
+python torture.py --iterations 100 --seed 42 --mode disk-full
+```
+
+### Available options
+
+| Argument | Description |
+|---|---|
+| `--mode` | Select one of the seven torture modes |
+| `--iterations` | Number of test iterations |
+| `--seed` | Random seed for reproducibility |
+| `--operations-per-iteration` | Writes per crash iteration |
+| `--workers` | Number of concurrent workers where supported |
+
+The default mode is `random`, with 500 iterations and four workers.
+
+Torture testing supplements the automated test suite. Different modes exercise different failure scenarios, and a successful run does not prove correctness for every possible operating-system or hardware failure.
+
+## 10. Verified Development Results
+
+The following results were reported during development and integration testing.
+
+### Automated tests
 
 | Metric | Result |
+|---|---:|
+| Automated tests passed | 64 |
+| Automated tests failed | 0 |
+| Latest recorded execution time | 97.21 seconds |
+
+### Process-crash torture testing
+
+| Test | Recorded result |
+|---|---|
+| Random process-crash mode | 500/500 iterations passed |
+| Acknowledged operations in that run | 13,085 |
+| Concurrent writers | 4 |
+| Compaction mode | 100/100 iterations passed |
+| Recovery-crash mode | 100/100 iterations passed |
+| Large-batch mode | 5/5 iterations passed |
+| Disk-full mode | 5/5 iterations passed |
+| Crash mode | 3/3 iterations passed |
+| Large-values mode | 5/5 iterations passed in an earlier run |
+
+The 100-iteration large-values command has not been completed as part of the latest integration sequence.
+
+### CLI verification
+
+The following operations were manually verified:
+
+- Database open.
+- PUT and GET.
+- DELETE and missing-key response.
+- Batch execution.
+- Database dump.
+- Database check and recovery.
+- Interactive `serve` protocol with PUT, GET, DELETE and NOT_FOUND responses.
+
+### Million-record benchmark
+
+A million-record benchmark was recorded during development:
+
+| Metric | Recorded result |
 |---|---:|
 | Records inserted | 1,000,000 |
 | Insertion time | 7.16 seconds |
 | Database size | 56.13 MB |
 | Recovery time | 1.64 seconds |
 | Recovered records | 1,000,000 |
-| Automated tests | 36 passed |
 
-These measurements are environment-dependent.
+The benchmark verified the recovered record count and selected values, rather than comparing every value.
 
-The million-record benchmark verified the record count and selected values, rather than comparing every value.
+All performance measurements are environment-dependent and should not be interpreted as universal guarantees.
 
 ## 11. Documentation
 
-Additional technical documentation is available in:
+Additional project documentation:
 
 - `ARCHITECTURE.md` — database architecture, binary record format, recovery, locking and scenario verification.
-- `BREAKING.md` — crash testing, failure experiments, observed results and known limitations.
-- `PROMPTS.md` — chronological record of AI prompts used during development.
+- `BREAKING.md` — crash-testing methodology, failure experiments, observed results and limitations.
+- `PROMPTS.md` — development prompt history.
 
-## 12. Current Implementation Status
+## 12. Reliability and Testing Limitations
 
-The current implementation provides a Python database API and a basic `main.py` demonstration.
+The project uses process-crash testing, independent expected-state verification, transaction recovery tests, compaction checkpoints and disk-capacity tests.
 
-The command-line interface is implemented in `main.py` and provides eight commands: `open`, `put`, `get`, `del`, `batch`, `dump`, `check` and `serve`. The `serve` command supports an interactive stdin command loop and returns acknowledgements after successful durable operations.
+Some important distinctions:
 
-Further testing is required for exact termination points during physical writes, recovery interruptions and other remaining failure scenarios. See `BREAKING.md` for the verification details.
+- A process kill is not identical to sudden power loss or physical storage failure.
+- Checkpoint-controlled termination verifies selected internal failure boundaries; it does not represent every possible timing.
+- A configured maximum database size is not identical to an actual operating-system disk-full event.
+- A passing finite torture run is evidence for the tested scenarios, not a mathematical proof of correctness.
+- The `serve` command processes requests through its command loop; concurrent database access is also tested separately through the database and process-level test harnesses.
+
+See `BREAKING.md` and `ARCHITECTURE.md` for the detailed guarantees, test evidence and known limitations.
 
 ## 13. Project Objective
 
